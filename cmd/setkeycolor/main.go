@@ -8,6 +8,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"math"
 	"os"
 
 	goHid "github.com/sstallion/go-hid"
@@ -31,6 +32,9 @@ func run() error {
 	h, s, v, err := color.Parse(*colorStr)
 	if err != nil {
 		return fmt.Errorf("parsing -color: %w", err)
+	}
+	if *index > math.MaxUint16 {
+		return fmt.Errorf("-index %d exceeds max LED index %d", *index, math.MaxUint16)
 	}
 
 	if err := goHid.Init(); err != nil {

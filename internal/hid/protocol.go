@@ -110,7 +110,7 @@ func (d *Device) GetNumberLEDs() (uint16, error) {
 func (d *Device) GetLEDInfo(index uint16) (row, col uint8, err error) {
 	resp, err := sendReport(d.raw, []byte{
 		cmdViaLightingGetValue, valVialRGBGetLEDInfo,
-		byte(index), byte(index >> 8),
+		byte(index), byte(index >> 8), // #nosec G115 -- little-endian split of a uint16 into its two bytes, not a truncation
 	})
 	if err != nil {
 		return 0, 0, err
@@ -148,7 +148,7 @@ func (d *Device) SetKeys(keys []KeyColor) error {
 	start := keys[0].Index
 	payload := []byte{
 		cmdViaLightingSetValue, valVialRGBDirectFastSet,
-		byte(start), byte(start >> 8), byte(len(keys)),
+		byte(start), byte(start >> 8), byte(len(keys)), // #nosec G115 -- start is a little-endian uint16 split; len(keys) is bounds-checked <= maxKeysPerReport above
 	}
 	for i, k := range keys {
 		if k.Index != start+uint16(i) {

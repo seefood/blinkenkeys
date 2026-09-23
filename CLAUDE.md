@@ -30,6 +30,21 @@ will be Go, following the package layout in the design spec (`cmd/blinkenkeysd/`
 ## Commands
 
 ```
+make build                        # builds bin/blinkenkeysd
+make test                         # go test ./...
+make lint                         # prek run --all-files
+```
+
+Requires Go 1.27+, a C compiler (cgo — `github.com/sstallion/go-hid` bundles
+its own hidapi C sources), and on Linux, the `libudev-dev` headers (hidraw
+backend, the default). See the plan's "Verified ground truth" section
+(`docs/superpowers/plans/2026-09-23-blinkenkeys-phase1-2-implementation.md`)
+for exactly what was checked before relying on it.
+
+Python scaffold commands (still valid — `set_key_color.py` remains the
+protocol reference, not superseded):
+
+```
 uv run --with hidapi set_key_color.py    # protocol smoke test against real hardware
 ```
 
@@ -42,10 +57,9 @@ Input Monitoring TCC grant for whatever binary runs it — expect this to fail
 intermittently for exactly the code-signing-identity-instability reason documented
 above; that instability is *why* the real daemon is being written in Go.
 
-No lint/test tooling is configured yet (no linter config, no test files). Once Go
-implementation starts, follow the test plan in the design spec's "Testing" section
-(unit tests against fake HID backends and a fake dispatcher; real-hardware checks
-stay manual/gated).
+Test plan follows the design spec's "Testing" section: unit tests against fake HID
+backends and a fake dispatcher; real-hardware checks stay manual/gated (see
+`docs/superpowers/manual-checks/`).
 
 ## Architecture essentials
 

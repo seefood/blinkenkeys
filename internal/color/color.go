@@ -78,7 +78,7 @@ func rgbToHSV(r, g, b uint8) (h, s, v uint8) {
 	if max == 0 {
 		return 0, 0, 0
 	}
-	s = uint8(delta * 255 / int(max))
+	s = uint8(delta * 255 / int(max)) // #nosec G115 -- delta <= max (delta = max-min, min >= 0), so delta*255/max <= 255
 	if delta == 0 {
 		return 0, s, v
 	}
