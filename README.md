@@ -75,6 +75,12 @@ feel free to patch it, but I don't condone it :)
 
 ## Known limitations
 
+`blinkenkeysd` opens the device's raw-HID interface exclusively, the same way Vial's
+own GUI does — only one process can hold that handle at a time. Running `blinkenkeysd`
+and Vial (or `set_key_color.py`, or any other tool talking to the same interface)
+against the same device simultaneously doesn't work; whichever opened it first keeps
+it, and the other fails to open the device until the first one releases it.
+
 VialRGB Direct-mode colors (`g_direct_mode_colors`) live in RAM only and are lost on
 any firmware reset, USB replug, or brownout — the daemon has no way to read the
 device's previous LED state back, only to (re)assert what it should be. This is why
