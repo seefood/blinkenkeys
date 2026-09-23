@@ -11,12 +11,13 @@ Linux and macOS: a udev rule (Linux only) for unprivileged HID access, a
 service-manager unit (`systemd --user` on Linux, a `launchd` LaunchAgent on
 macOS), and an idempotent install script for each platform.
 
-Both platforms are designed here. **Only the Linux installer is implemented in
-this pass** — the macOS side is specified to sketch/design level so the shape
-is settled, but the user will implement and test it later on their own
-laptop. This is not part of the original 6-phase product roadmap (`README.md`
-has no packaging/install phase); it's follow-on work the user asked for after
-Phases 1+2 landed.
+Both platforms are fully specced here, down to literal file contents. **Only
+the Linux installer is implemented in this pass** — the macOS design is
+complete enough to implement from directly, but the user will write the
+actual `packaging/macos/install.sh` and test it later on their own laptop,
+since this session has no macOS machine to verify against. This is not part
+of the original 6-phase product roadmap (`README.md` has no packaging/install
+phase); it's follow-on work the user asked for after Phases 1+2 landed.
 
 Not in scope: `config.Load` wiring into `main()` (still deferred, tracked
 separately — see the Phase 1+2 plan's "Explicitly deferred" section), an
@@ -170,32 +171,102 @@ Steps:
 `--force`: reinstalls/overwrites all three artifacts unconditionally,
 regardless of whether they differ.
 
-### macOS (design sketch — implementation deferred to the user)
+### macOS: LaunchAgent plist
 
 No udev analog needed — no TCC grant gates this usage page (see Background),
 so there's no access-control artifact to install at all, only the binary and
 a LaunchAgent.
 
-`packaging/macos/com.seefood.blinkenkeysd.plist` (sketch — exact keys to be
-finalized when implemented):
+`packaging/macos/com.seefood.blinkenkeysd.plist`:
 
-- `RunAtLoad = true`
-- `KeepAlive = { SuccessfulExit = false }` — launchd's rough equivalent of
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.seefood.blinkenkeysd</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>__BLINKENKEYSD_BIN__</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>__LOG_DIR__/blinkenkeysd.log</string>
+    <key>StandardErrorPath</key>
+    <string>__LOG_DIR__/blinkenkeysd.log</string>
+</dict>
+</plist>
+```
+
+- `KeepAlive.SuccessfulExit = false` is launchd's equivalent of
   `Restart=on-failure`: relaunch on a crash/nonzero exit, not on a clean exit.
-- `ProgramArguments` pointing at the resolved binary path, via the same
-  `__BLINKENKEYSD_BIN__`-placeholder substitution approach as the systemd
-  template.
-- Installed to `~/Library/LaunchAgents/com.seefood.blinkenkeysd.plist` (a
-  LaunchAgent, never a LaunchDaemon — CLAUDE.md hard constraint).
+- `__BLINKENKEYSD_BIN__` and `__LOG_DIR__` are literal placeholder tokens,
+  substituted by `install.sh` the same way the systemd template's
+  `__BLINKENKEYSD_BIN__` is — `LOG_DIR` resolves to the same
+  `~/.local/state/blinkenkeys` directory `blinkenkeysd` already uses for its
+  socket. Explicit log paths are necessary here (unlike the Linux unit, which
+  relies on `journalctl --user` auto-capturing stdout/stderr): a LaunchAgent
+  with no `Standard{Out,Error}Path` set discards that output, which would be a
+  silent regression in debuggability versus the Linux side.
+- Installed to `~/Library/LaunchAgents/com.seefood.blinkenkeysd.plist` — a
+  fixed, OS-mandated location (no XDG equivalent applies here), and a
+  LaunchAgent, never a LaunchDaemon (CLAUDE.md hard constraint).
 
-`packaging/macos/install.sh` (sketch): same binary-location convention
-(`$XDG_BIN_HOME`/`~/.local/bin`), same idempotent/`--force` shape as the Linux
-script, but no `sudo` lines at all (nothing here needs root), and
-`launchctl bootstrap gui/$(id -u) <plist>` in place of
-`systemctl --user enable --now`.
+### macOS: `install.sh`
 
-This section is intentionally a sketch, not literal final content — the user
-will write and test it directly on macOS hardware later.
+Same shape as the Linux script — single script, idempotent unless `--force`,
+same `$XDG_BIN_HOME`/`~/.local/bin` binary-location convention — but no `sudo`
+lines at all, since nothing here needs root, and `launchctl` in place of
+`systemctl --user`.
+
+Steps:
+
+1. Resolve `BIN_DIR=${XDG_BIN_HOME:-$HOME/.local/bin}`, `mkdir -p` it.
+2. Require `bin/blinkenkeysd` already exists (built via `make build`); error
+   out if missing, same as Linux.
+3. Copy `bin/blinkenkeysd` → `$BIN_DIR/blinkenkeysd`; skip if `cmp -s` shows
+   it's already identical, unless `--force`. Track whether it changed.
+4. `mkdir -p ~/.local/state/blinkenkeys` (the log directory) defensively.
+5. Render `packaging/macos/com.seefood.blinkenkeysd.plist` (substitute
+   `__BLINKENKEYSD_BIN__` and `__LOG_DIR__`) and write to
+   `~/Library/LaunchAgents/com.seefood.blinkenkeysd.plist`. Skip if identical
+   unless `--force`. Track whether it changed.
+6. Check whether the agent is currently loaded:
+   `launchctl print gui/$(id -u)/com.seefood.blinkenkeysd >/dev/null 2>&1`
+   (exit 0 = loaded, nonzero = not loaded).
+7. Reconcile load state against what changed:
+   - Not loaded: `launchctl bootstrap gui/$(id -u)
+     ~/Library/LaunchAgents/com.seefood.blinkenkeysd.plist`.
+   - Loaded and the plist changed (or `--force`): `launchctl bootout
+     gui/$(id -u)/com.seefood.blinkenkeysd` then `bootstrap` again — a
+     changed plist requires a full reload, `kickstart` alone won't pick up
+     new plist content.
+   - Loaded, only the binary changed, plist unchanged: `launchctl kickstart -k
+     gui/$(id -u)/com.seefood.blinkenkeysd` (restart the process; `-k` kills
+     the running instance first) — `ProgramArguments`' path didn't change, so
+     a full reload isn't needed.
+   - Loaded, nothing changed, no `--force`: no-op.
+8. Print a summary: `launchctl print gui/$(id -u)/com.seefood.blinkenkeysd`
+   plus which artifacts were installed/unchanged/force-reinstalled.
+
+`--force`: reinstalls the binary and plist unconditionally and always does the
+bootout+bootstrap reload path, mirroring the Linux script's `--force`.
+
+**Verification caveat:** the `launchctl bootstrap`/`bootout`/`kickstart`/
+`print` subcommands and `gui/$UID` domain targeting above were checked against
+current documentation (Apple's `launchctl(1)`, corroborated by ss64.com and
+community references) but not run against a real launchd instance from this
+Linux session — exact exit codes and `print` output formatting should be
+confirmed on real macOS hardware when this is implemented, per the same
+verification standard the Linux side got by being tested against real
+hardware in this session.
 
 ### Testing / verification
 
@@ -205,20 +276,27 @@ mocking away the entire point of the script. Verification is:
 
 - **Automated:** `shellcheck` and `shfmt` `prek` hooks over `packaging/**/*.sh`
   — the first shell scripts in this repo, so these are new hooks, not existing
-  ones being extended.
-- **Manual:** `docs/superpowers/manual-checks/phase2-5-linux-install.md`,
-  following the same pattern as the Phase 1+2 hardware round-trip doc. Covers:
-  fresh install from a clean state, idempotent re-run (confirm no-op, no
-  unnecessary `sudo` prompts), `--force` re-install, and a by-hand uninstall
-  note (no uninstall script is being built this pass, but the doc records what
-  to remove manually: the two artifact files, the systemd unit
-  disable/daemon-reload).
+  ones being extended. These apply to both platforms' scripts once they exist.
+- **Manual, Linux (this pass):**
+  `docs/superpowers/manual-checks/phase2-5-linux-install.md`, following the
+  same pattern as the Phase 1+2 hardware round-trip doc. Covers: fresh install
+  from a clean state, idempotent re-run (confirm no-op, no unnecessary `sudo`
+  prompts), `--force` re-install, and a by-hand uninstall note (no uninstall
+  script is being built this pass, but the doc records what to remove
+  manually: the two artifact files, the systemd unit disable/daemon-reload).
+- **Manual, macOS (deferred to the user):** an equivalent
+  `docs/superpowers/manual-checks/phase2-5-macos-install.md` is not written in
+  this pass — the user will write and run it alongside their own
+  implementation, covering the same cases (fresh install, idempotent re-run,
+  `--force`, by-hand uninstall) plus confirming the `launchctl` reload-path
+  reconciliation in step 7 actually behaves as specced.
 
 ## Explicitly deferred past this spec
 
-- macOS `install.sh` and plist implementation/testing (user will do this on
-  their own laptop).
-- An uninstall script.
+- Writing `packaging/macos/install.sh` and the macOS manual-check doc, and
+  testing both against real launchd/macOS behavior (design is complete above;
+  the user will implement and verify it on their own laptop).
+- An uninstall script (either platform).
 - A root-fallback path in `install.sh` for environments where the udev rule
   can't be installed (e.g. no `sudo` access) — the design spec's warned-root-
   fallback (`warnIfRootFallback`) is a `blinkenkeysd` runtime concern, not an
