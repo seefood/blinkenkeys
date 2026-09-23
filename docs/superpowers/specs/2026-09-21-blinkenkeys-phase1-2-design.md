@@ -1,4 +1,4 @@
-# vialrgb-notify: Phase 1+2 design (POC → MVP)
+# blinkenkeys: Phase 1+2 design (POC → MVP)
 
 Date: 2026-09-21 (architecture revised 2026-09-23: dropped privilege separation
 after confirming raw HID to a vendor-defined usage page needs no macOS TCC grant;
@@ -66,7 +66,7 @@ phases don't require rewrites. Each such decision is marked **(forward-looking)*
 
 ## Architecture
 
-**One long-lived process, `vialrgbd`.** The Phase 1 design split this into a
+**One long-lived process, `blinkenkeysd`.** The Phase 1 design split this into a
 privileged `connectord` + unprivileged `restd` pair specifically to isolate raw HID
 access behind a stable-identity, always-user-level component, on the assumption that
 macOS gated that access. Now that's confirmed false (see Background) — there is no
@@ -76,7 +76,7 @@ just a specially-blessed process. Splitting the process bought nothing and cost 
 IPC layer, a supervision relationship, and a second binary to build/deploy/log. It's
 removed.
 
-`vialrgbd` responsibilities, all in one process:
+`blinkenkeysd` responsibilities, all in one process:
 
 - Enumerates all matching Vial raw-HID interfaces (usage page `0xFF60` / usage
   `0x61`) at startup and on hotplug, and opens/talks to them directly via `hidapi`
@@ -106,7 +106,7 @@ removed.
     machine.
   - **Windows**: unimplemented; left as an open question for a future contribution.
 
-## External API: `vialrgbd` ↔ clients
+## External API: `blinkenkeysd` ↔ clients
 
 - Listeners (config-driven):
   - `$HOME`-owned Unix socket, mode `0600`, always on. Bearer token optional here
@@ -117,7 +117,7 @@ removed.
     enabled** — not user-configurable to disable, since nothing else scopes access
     once it's network-reachable. Plain HTTP (no TLS) is the accepted threat model for
     a trusted LAN; SSH port forwarding is the documented path if stronger transport
-    security is ever wanted, rather than adding TLS to `vialrgbd`.
+    security is ever wanted, rather than adding TLS to `blinkenkeysd`.
 - Routes (Phase 1 + 2):
   - `PUT /devices/{name}/keys/{row},{col}` — body: a `color` field (see Color format).
   - `GET /devices` — list configured/connected device names + connection state.
@@ -127,7 +127,7 @@ removed.
 Reachable via:
 
 ```
-curl --unix-socket ~/.local/state/vialrgb-notify/api.sock \
+curl --unix-socket ~/.local/state/blinkenkeys/api.sock \
   -X PUT -d '{"color":"#ff0000"}' \
   http://localhost/devices/cxt12e4-0/keys/2,2
 ```
@@ -158,7 +158,7 @@ triple; else → keyword lookup. Anything else → `400`.
 VialRGB Direct-mode colors (`g_direct_mode_colors`) live in the keyboard's RAM only —
 confirmed on real hardware: a firmware reset, USB replug, or brownout silently
 reverts every LED to whatever the boot-time mode/colors are, and there is no HID
-command to read the current Direct-mode color array back. `vialrgbd` is the only
+command to read the current Direct-mode color array back. `blinkenkeysd` is the only
 place that can know what a device's colors are "supposed to be," so it must remember
 it, not just fire-and-forget each `PUT`.
 
@@ -191,7 +191,7 @@ it, not just fire-and-forget each `PUT`.
   one."
 - Redraws go through the same dispatcher/batching path as any other `SetKeys` call
   (see Concurrency) — no special-cased write path.
-- Devices with an empty cache (never had a color set since `vialrgbd` started) are
+- Devices with an empty cache (never had a color set since `blinkenkeysd` started) are
   skipped on both triggers — there's nothing to redraw yet.
 
 ## Concurrency & traffic management (forward-looking, built now)
@@ -245,9 +245,9 @@ HID handle, so this is not deferred to Phase 3.
 
 ## Config
 
-`~/.config/vialrgb-notify/config.yaml` (path TBD-but-conventional; not a placeholder
+`~/.config/blinkenkeys/config.yaml` (path TBD-but-conventional; not a placeholder
 in the sense of being undecided-and-blocking, just not bikeshedded here). Naming
-rules, listener config, and tokens all live here, loaded once at `vialrgbd` startup.
+rules, listener config, and tokens all live here, loaded once at `blinkenkeysd` startup.
 Phase 4's per-status YAML templates live under a `templates/` subdirectory of the
 same config root.
 
@@ -270,8 +270,8 @@ same config root.
 ## Package layout (Go, indicative)
 
 ```
-vialrgb-notify/
-  cmd/vialrgbd/         main() — startup, listeners, dispatcher, handlers
+blinkenkeys/
+  cmd/blinkenkeysd/         main() — startup, listeners, dispatcher, handlers
   internal/hid/         enumeration, identity resolution, VialRGB protocol
   internal/api/         HTTP handlers, color parsing, auth middleware
   internal/dispatcher/  traffic-cop/batching logic, state cache, redraw timers

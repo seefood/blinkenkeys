@@ -1,13 +1,13 @@
-# vialrgb-notify Phase 1+2 Implementation Plan
+# blinkenkeys Phase 1+2 Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Implement the Go `vialrgbd` daemon described in
-`docs/superpowers/specs/2026-09-21-vialrgb-notify-phase1-2-design.md`: set a
+**Goal:** Implement the Go `blinkenkeysd` daemon described in
+`docs/superpowers/specs/2026-09-21-blinkenkeys-phase1-2-design.md`: set a
 single key's color on one HID device (Phase 1), and enumerate/report
 capabilities of all connected Vial-capable devices with stable names (Phase 2).
 
-**Architecture:** One long-lived process, `vialrgbd`. It enumerates
+**Architecture:** One long-lived process, `blinkenkeysd`. It enumerates
 Vial-capable devices directly via `github.com/sstallion/go-hid` (no
 privilege separation — the design spec's revision history explains why the
 original `connectord`/`restd` split was dropped: macOS's Input Monitoring
@@ -68,7 +68,7 @@ none of it is guessed:
   `vialrgb.c`'s `fast_set_leds` comment.
 - **Current stable Go is 1.27.1** (confirmed via both `brew info go` and
   `https://go.dev/VERSION?m=text`).
-- Module path `github.com/seefood/vialrgb-notify` — confirmed with the user
+- Module path `github.com/seefood/blinkenkeys` — confirmed with the user
   (matches their `gh` CLI identity; this repo isn't pushed to GitHub yet).
 - **`github.com/goccy/go-yaml` v1.19.2**: actively maintained (unlike
   `gopkg.in/yaml.v3`, which is archived/unmaintained upstream), zero
@@ -76,10 +76,10 @@ none of it is guessed:
   `Unmarshal` API and `yaml:"..."` struct-tag conventions are drop-in
   compatible with `yaml.v3` for the plain-struct usage in Task 13's
   `config.Load` — no call-site changes needed beyond the import path.
-- **No privilege drop is needed in the single-binary `vialrgbd` design**: there
+- **No privilege drop is needed in the single-binary `blinkenkeysd` design**: there
   is no spawned child to drop, and the design spec's explicit ban on calling
   `syscall.Setuid`/`Setgid` on an already-running process (broken across Go's
-  OS threads, `golang/go#1435`) means `vialrgbd` itself can never safely drop
+  OS threads, `golang/go#1435`) means `blinkenkeysd` itself can never safely drop
   out of a root fallback either — so Task 14's `warnIfRootFallback` only logs
   a warning, it does not attempt to de-escalate.
 
@@ -103,13 +103,13 @@ fine; this is the toolchain, not a pinned go.mod requirement).
 
 - [ ] **Step 2: Initialize the module**
 
-Run from the repo root (`/Users/ira/src/CXT-studio/vialrgb-notify`):
+Run from the repo root (`/Users/ira/src/CXT-studio/blinkenkeys`):
 
 ```bash
-go mod init github.com/seefood/vialrgb-notify
+go mod init github.com/seefood/blinkenkeys
 ```
 
-Expected: creates `go.mod` with `module github.com/seefood/vialrgb-notify`
+Expected: creates `go.mod` with `module github.com/seefood/blinkenkeys`
 and a `go` directive matching the installed toolchain.
 
 - [ ] **Step 3: Add the three verified dependencies, pinned**
@@ -921,7 +921,7 @@ type Controller interface {
 }
 
 // Identity is a resolved identity for one attached device, gathered by
-// vialrgbd's startup enumeration (and re-gathered on each hotplug poll —
+// blinkenkeysd's startup enumeration (and re-gathered on each hotplug poll —
 // see internal/dispatcher's Registry) via the enumeration path plus a
 // GetKeyboardUID probe.
 type Identity struct {
@@ -982,9 +982,9 @@ git commit -m "Add internal/hid enumeration, Open, Controller, and stable-name r
 
 This task lays down `internal/dispatcher`'s data structures before the
 single-writer goroutine (Task 7) that operates on them. `Registry` tracks
-every device `vialrgbd` has ever seen by name, connected or not — replacing
+every device `blinkenkeysd` has ever seen by name, connected or not — replacing
 the old `connectord`/`restd` split's need for anything wire-level, since
-`vialrgbd` calls `hid.Controller` methods directly, in-process. Its
+`blinkenkeysd` calls `hid.Controller` methods directly, in-process. Its
 `Reconcile` method is both the naming authority (using `hid.BaseName` for
 identity plus its own `-0`/`-1`/`-2` dedup suffixing, scoped across every
 name Registry has ever assigned rather than one enumeration snapshot, since
@@ -1015,7 +1015,7 @@ Any `untethered` slot older than `UntetheredMaxAge` (24h) is deleted on the
 `Reconcile` call that first notices the age, reported in `Evicted` so the
 caller can also forget its `Cache` entry — a later device presenting that
 same identity is then a fresh allocation, not a rewire, and starts with an
-empty cache. `Reconcile` runs on `cmd/vialrgbd`'s existing 1s hotplug-poll
+empty cache. `Reconcile` runs on `cmd/blinkenkeysd`'s existing 1s hotplug-poll
 cadence (Task 14), so eviction is checked at least that often — tighter than
 "the same 5s ticker that drives periodic redraw" would give, and without
 needing a third, separate ticker.
@@ -1037,7 +1037,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/seefood/vialrgb-notify/internal/hid"
+	"github.com/seefood/blinkenkeys/internal/hid"
 )
 
 // fakeController is reused by every test file in this package.
@@ -1200,7 +1200,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/seefood/vialrgb-notify/internal/hid"
+	"github.com/seefood/blinkenkeys/internal/hid"
 )
 
 func TestCacheUpdateAndSnapshot(t *testing.T) {
@@ -1244,7 +1244,7 @@ Run: `go test ./internal/dispatcher/...` — fails, package doesn't exist yet.
 
 `internal/dispatcher/types.go`:
 ```go
-// Package dispatcher is vialrgbd's single-writer "traffic cop" for the HID
+// Package dispatcher is blinkenkeysd's single-writer "traffic cop" for the HID
 // handle: every other goroutine (HTTP handlers; the periodic/reconnect
 // redraw loops) submits work through the Dispatcher and never touches a
 // hid.Controller directly, since hidapi is not guaranteed safe under
@@ -1291,7 +1291,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/seefood/vialrgb-notify/internal/hid"
+	"github.com/seefood/blinkenkeys/internal/hid"
 )
 
 // UntetheredMaxAge is how long a disconnected device's name/cache slot stays
@@ -1338,7 +1338,7 @@ type ReconcileResult struct {
 	Evicted []string
 }
 
-// Registry is vialrgbd's persistent name-assignment and presence state: name
+// Registry is blinkenkeysd's persistent name-assignment and presence state: name
 // -> slot. Unlike a stateless per-poll naming pass, Registry remembers slots
 // across polls so a device that disconnects doesn't lose its name or cached
 // colors immediately — see Reconcile.
@@ -1484,14 +1484,14 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/seefood/vialrgb-notify/internal/hid"
+	"github.com/seefood/blinkenkeys/internal/hid"
 )
 
 // Cache remembers the last color successfully written to each key of each
 // device, since VialRGB Direct-mode colors live in the keyboard's RAM only
 // and are lost on any reset/replug/brownout with no way to read them back
 // (design spec's "State persistence & refresh"). Not persisted to disk — on
-// a vialrgbd restart there's nothing more trustworthy to reload than an
+// a blinkenkeysd restart there's nothing more trustworthy to reload than an
 // empty cache.
 type Cache struct {
 	mu       sync.Mutex
@@ -1682,7 +1682,7 @@ package dispatcher
 import (
 	"context"
 
-	"github.com/seefood/vialrgb-notify/internal/hid"
+	"github.com/seefood/blinkenkeys/internal/hid"
 )
 
 type opKind int
@@ -1884,7 +1884,7 @@ package dispatcher
 import (
 	"testing"
 
-	"github.com/seefood/vialrgb-notify/internal/hid"
+	"github.com/seefood/blinkenkeys/internal/hid"
 )
 
 func setKeyJob(device string, index uint16) job {
@@ -2028,7 +2028,7 @@ existing hotplug-poll loop that already calls `Reconcile`, `RunPeriodicRedraw`
 off its own independent ticker — two genuinely independent triggers, per the
 design spec, not one mechanism wearing two names. This task also adds a test
 proving the untethered-rewire-regains-cache behavior end to end within this
-package (Registry + Cache + Dispatcher composed, no `cmd/vialrgbd` needed).
+package (Registry + Cache + Dispatcher composed, no `cmd/blinkenkeysd` needed).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2043,7 +2043,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/seefood/vialrgb-notify/internal/hid"
+	"github.com/seefood/blinkenkeys/internal/hid"
 )
 
 func discardLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
@@ -2247,7 +2247,7 @@ git commit -m "Add internal/dispatcher reconnect and periodic state-persistence 
 - Create: `internal/api/handlers.go`
 - Create: `internal/api/handlers_test.go`
 
-`internal/api` implements vialrgbd's HTTP surface. `Handler` depends on a
+`internal/api` implements blinkenkeysd's HTTP surface. `Handler` depends on a
 `Dispatcher` interface (the subset of `*dispatcher.Dispatcher`'s methods it
 needs) so tests can substitute a fake without a real dispatcher goroutine,
 and a `CapabilitiesSource` interface (Task 11 supplies the real
@@ -2272,7 +2272,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/seefood/vialrgb-notify/internal/dispatcher"
+	"github.com/seefood/blinkenkeys/internal/dispatcher"
 )
 
 // fakeDispatcher and fakeCaps are reused by every test file in this package.
@@ -2396,7 +2396,7 @@ Run: `go test ./internal/api/...` — fails, package doesn't exist yet.
 
 `internal/api/handlers.go`:
 ```go
-// Package api implements vialrgbd's HTTP surface: the PUT/GET routes from
+// Package api implements blinkenkeysd's HTTP surface: the PUT/GET routes from
 // the design spec, backed directly by an in-process internal/dispatcher.Dispatcher
 // (no RPC layer — single binary, single process).
 package api
@@ -2410,8 +2410,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/seefood/vialrgb-notify/internal/color"
-	"github.com/seefood/vialrgb-notify/internal/dispatcher"
+	"github.com/seefood/blinkenkeys/internal/color"
+	"github.com/seefood/blinkenkeys/internal/dispatcher"
 )
 
 // Dispatcher is the subset of *dispatcher.Dispatcher the HTTP handlers need,
@@ -2430,7 +2430,7 @@ type CapabilitiesSource interface {
 	IndexFor(ctx context.Context, device string, row, col uint8) (uint16, bool, error)
 }
 
-// Handler holds vialrgbd's HTTP dependencies and builds its route table.
+// Handler holds blinkenkeysd's HTTP dependencies and builds its route table.
 type Handler struct {
 	disp Dispatcher
 	caps CapabilitiesSource
@@ -2441,7 +2441,7 @@ func NewHandler(disp Dispatcher, caps CapabilitiesSource) *Handler {
 	return &Handler{disp: disp, caps: caps}
 }
 
-// Routes builds vialrgbd's route table (Go 1.22+ ServeMux method+wildcard
+// Routes builds blinkenkeysd's route table (Go 1.22+ ServeMux method+wildcard
 // patterns — no external router dependency needed).
 func (h *Handler) Routes() *http.ServeMux {
 	mux := http.NewServeMux()
@@ -2560,7 +2560,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/seefood/vialrgb-notify/internal/dispatcher"
+	"github.com/seefood/blinkenkeys/internal/dispatcher"
 )
 
 func TestCapabilitiesCacheIndexFor(t *testing.T) {
@@ -2615,7 +2615,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/seefood/vialrgb-notify/internal/dispatcher"
+	"github.com/seefood/blinkenkeys/internal/dispatcher"
 )
 
 func TestListDevices(t *testing.T) {
@@ -2663,7 +2663,7 @@ import (
 	"context"
 	"sync"
 
-	"github.com/seefood/vialrgb-notify/internal/dispatcher"
+	"github.com/seefood/blinkenkeys/internal/dispatcher"
 )
 
 // CapabilitiesCache implements CapabilitiesSource by calling
@@ -2929,7 +2929,7 @@ naming:
   prefer: uid
 listeners:
   socket:
-    path: ~/.local/state/vialrgb-notify/api.sock
+    path: ~/.local/state/blinkenkeys/api.sock
 `)
 	cfg, err := Load(path)
 	if err != nil {
@@ -2977,8 +2977,8 @@ Expected: `FAIL` — package doesn't exist yet.
 `config/config.go`:
 
 ```go
-// Package config loads vialrgbd's on-disk configuration
-// (~/.config/vialrgb-notify/config.yaml), read once at startup, per the
+// Package config loads blinkenkeysd's on-disk configuration
+// (~/.config/blinkenkeys/config.yaml), read once at startup, per the
 // design spec's Config section.
 package config
 
@@ -2989,20 +2989,20 @@ import (
 	"github.com/goccy/go-yaml"
 )
 
-// Config is vialrgbd's on-disk configuration.
+// Config is blinkenkeysd's on-disk configuration.
 type Config struct {
 	Naming    NamingRule `yaml:"naming"`
 	Listeners Listeners  `yaml:"listeners"`
 }
 
-// NamingRule selects vialrgbd's preferred device-naming strategy; it still
+// NamingRule selects blinkenkeysd's preferred device-naming strategy; it still
 // falls back automatically per device if a device can't answer
 // GetKeyboardUID.
 type NamingRule struct {
 	Prefer string `yaml:"prefer"` // "uid" (default), "path", or "vidpid"
 }
 
-// Listeners configures vialrgbd's listeners.
+// Listeners configures blinkenkeysd's listeners.
 type Listeners struct {
 	Socket SocketListener `yaml:"socket"`
 	TCP    *TCPListener   `yaml:"tcp,omitempty"` // nil = disabled (off by default)
@@ -3061,11 +3061,11 @@ git commit -m "Add config package: YAML loading with TCP-requires-token validati
 
 ---
 
-## Task 14: `cmd/vialrgbd` — `main()`
+## Task 14: `cmd/blinkenkeysd` — `main()`
 
 **Files:**
-- Create: `cmd/vialrgbd/main.go`
-- Create: `cmd/vialrgbd/main_test.go`
+- Create: `cmd/blinkenkeysd/main.go`
+- Create: `cmd/blinkenkeysd/main_test.go`
 
 This replaces the old `connectord`/`restd` split entirely: one binary
 enumerates devices, owns the `internal/dispatcher.Dispatcher`, runs the
@@ -3077,11 +3077,11 @@ without hardware, and exercised instead by Task 17's manual/gated hardware
 check, per the design spec's testing plan. The one piece of pure logic —
 whether to log a root-fallback warning — is unit tested here.
 
-Per the design spec's macOS/Linux privilege sections: `vialrgbd` never drops
+Per the design spec's macOS/Linux privilege sections: `blinkenkeysd` never drops
 privilege. There's no spawned child left to drop it for (unlike the old
 `connectord`/`restd` split's `credentialForRestd`, which this plan no longer
 needs), and the design spec bans `syscall.Setuid`/`Setgid` on an
-already-running process outright (`golang/go#1435`), so `vialrgbd` couldn't
+already-running process outright (`golang/go#1435`), so `blinkenkeysd` couldn't
 safely de-escalate itself even if it wanted to. Running as root is purely
 the Linux udev-rule-unavailable fallback; `warnIfRootFallback` just makes
 that posture loud, since now the *entire* HTTP surface — not just raw HID
@@ -3089,7 +3089,7 @@ I/O — would be running with it.
 
 - [ ] **Step 1: Write the failing test**
 
-`cmd/vialrgbd/main_test.go`:
+`cmd/blinkenkeysd/main_test.go`:
 ```go
 package main
 
@@ -3125,11 +3125,11 @@ func TestWarnIfRootFallback_LinuxRoot(t *testing.T) {
 }
 ```
 
-Run: `go test ./cmd/vialrgbd/...` — fails, package doesn't exist yet.
+Run: `go test ./cmd/blinkenkeysd/...` — fails, package doesn't exist yet.
 
 - [ ] **Step 2: Implement**
 
-`cmd/vialrgbd/main.go`:
+`cmd/blinkenkeysd/main.go`:
 ```go
 package main
 
@@ -3146,9 +3146,9 @@ import (
 
 	goHid "github.com/sstallion/go-hid"
 
-	"github.com/seefood/vialrgb-notify/internal/api"
-	"github.com/seefood/vialrgb-notify/internal/dispatcher"
-	"github.com/seefood/vialrgb-notify/internal/hid"
+	"github.com/seefood/blinkenkeys/internal/api"
+	"github.com/seefood/blinkenkeys/internal/dispatcher"
+	"github.com/seefood/blinkenkeys/internal/hid"
 )
 
 const (
@@ -3201,26 +3201,26 @@ func main() {
 		os.Exit(1)
 	}
 
-	logger.Info("vialrgbd listening", "socket", socketPath)
+	logger.Info("blinkenkeysd listening", "socket", socketPath)
 	if err := http.Serve(listener, handler.Routes()); err != nil {
 		logger.Error("http server exited", "err", err)
 		os.Exit(1)
 	}
 }
 
-// warnIfRootFallback logs a prominent warning when vialrgbd is running as
+// warnIfRootFallback logs a prominent warning when blinkenkeysd is running as
 // root on Linux — the design spec's fallback path for when no udev rule can
 // be installed. Unlike the old connectord/restd split, there is no
 // unprivileged process left to isolate the HTTP surface behind: root here
 // means the whole daemon, including any future TCP listener, runs as root.
 // Per the design spec's ban on syscall.Setuid/Setgid on a running process
-// (golang/go#1435), vialrgbd cannot safely de-escalate itself even if it
+// (golang/go#1435), blinkenkeysd cannot safely de-escalate itself even if it
 // wanted to — this function only warns, it never attempts to drop privilege.
 func warnIfRootFallback(goos string, euid int, logger *slog.Logger) {
 	if goos != "linux" || euid != 0 {
 		return
 	}
-	logger.Warn("vialrgbd is running as root — this is the udev-rule-unavailable " +
+	logger.Warn("blinkenkeysd is running as root — this is the udev-rule-unavailable " +
 		"fallback and runs the entire HTTP surface (including any future TCP " +
 		"listener) as root too; install a udev rule granting the logged-in user " +
 		"access to the device instead, per the design spec's Background section")
@@ -3235,7 +3235,7 @@ type openDevice struct {
 	ctrl     hid.Controller
 }
 
-// deviceState is cmd/vialrgbd's bookkeeping of currently open HID paths,
+// deviceState is cmd/blinkenkeysd's bookkeeping of currently open HID paths,
 // independent of internal/dispatcher.Registry's name-keyed view (a single
 // physical device's path is stable across polls; its assigned name is not
 // recomputed unless the whole present-device set changes composition).
@@ -3351,27 +3351,27 @@ func pollForDevices(ctx context.Context, state *deviceState, registry *dispatche
 }
 
 func socketPathFromEnv() string {
-	if p := os.Getenv("VIALRGB_NOTIFY_SOCKET"); p != "" {
+	if p := os.Getenv("BLINKENKEYS_SOCKET"); p != "" {
 		return p
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		home = "."
 	}
-	return filepath.Join(home, ".local", "state", "vialrgb-notify", "api.sock")
+	return filepath.Join(home, ".local", "state", "blinkenkeys", "api.sock")
 }
 ```
 
 - [ ] **Step 3: Verify**
 
 Run: `go build ./...` (verifies the whole tree compiles) and `go test
-./cmd/vialrgbd/...` (the three `warnIfRootFallback` cases pass).
+./cmd/blinkenkeysd/...` (the three `warnIfRootFallback` cases pass).
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add cmd/vialrgbd
-git commit -m "Add cmd/vialrgbd main: enumeration, hotplug/redraw loops, HTTP server"
+git add cmd/blinkenkeysd
+git commit -m "Add cmd/blinkenkeysd main: enumeration, hotplug/redraw loops, HTTP server"
 ```
 
 ---
@@ -3390,7 +3390,7 @@ git commit -m "Add cmd/vialrgbd main: enumeration, hotplug/redraw loops, HTTP se
 .PHONY: build test lint
 
 build:
-	go build -o bin/vialrgbd ./cmd/vialrgbd
+	go build -o bin/blinkenkeysd ./cmd/blinkenkeysd
 
 test:
 	go test ./...
@@ -3409,7 +3409,7 @@ Python smoke-test commands too (still valid as a protocol reference):
 ## Commands
 
 ```
-make build                        # builds bin/vialrgbd
+make build                        # builds bin/blinkenkeysd
 make test                         # go test ./...
 make lint                         # prek run --all-files
 ```
@@ -3417,7 +3417,7 @@ make lint                         # prek run --all-files
 Requires Go 1.27+, a C compiler (cgo — `github.com/sstallion/go-hid` bundles
 its own hidapi C sources), and on Linux, the `libudev-dev` headers (hidraw
 backend, the default). See the plan's "Verified ground truth" section
-(`docs/superpowers/plans/2026-09-23-vialrgb-notify-phase1-2-implementation.md`)
+(`docs/superpowers/plans/2026-09-23-blinkenkeys-phase1-2-implementation.md`)
 for exactly what was checked before relying on it.
 
 Python scaffold commands (still valid — `set_key_color.py` remains the
@@ -3432,7 +3432,7 @@ uv run python set_key_color.py    # protocol smoke test against real hardware
 - [ ] **Step 3: Update the project state/architecture description in `CLAUDE.md`**
 
 Also update `CLAUDE.md`'s prose describing the `connectord`/`restd` two-process
-architecture to describe the single `vialrgbd` binary instead, matching the
+architecture to describe the single `blinkenkeysd` binary instead, matching the
 revised design spec (this plan's own header section has the up-to-date
 wording to reuse). In particular, the bullet points about the anonymous
 `socketpair`/`exec.Cmd.ExtraFiles` internal link, the "traffic cop"
@@ -3446,7 +3446,7 @@ there is no spawned child left to drop privilege for.
 
 ```bash
 git add Makefile CLAUDE.md README.md
-git commit -m "Add Makefile; update CLAUDE.md for the single-binary vialrgbd architecture"
+git commit -m "Add Makefile; update CLAUDE.md for the single-binary blinkenkeysd architecture"
 ```
 
 ---
@@ -3524,7 +3524,7 @@ flashed.
 # Phase 1+2 hardware round-trip check
 
 Manual, gated on physical hardware — not run in CI. Run this after any
-change touching `internal/hid`, `internal/dispatcher`, or `cmd/vialrgbd`,
+change touching `internal/hid`, `internal/dispatcher`, or `cmd/blinkenkeysd`,
 before considering that change verified end-to-end.
 
 Prerequisites: `cxt_studio/12e4` attached, `personal/vialrgb-direct/001-enable`
@@ -3532,24 +3532,24 @@ firmware flashed (see `../../../README.md` and the parent `CXT-studio`
 tree's `../qmk_vial`).
 
 1. `make build`
-2. Run `./bin/vialrgbd` in a terminal you can watch logs in. Confirm it logs
+2. Run `./bin/blinkenkeysd` in a terminal you can watch logs in. Confirm it logs
    enumerating the board.
 3. In a second terminal, list devices:
    ```bash
-   curl --unix-socket ~/.local/state/vialrgb-notify/api.sock http://localhost/devices
+   curl --unix-socket ~/.local/state/blinkenkeys/api.sock http://localhost/devices
    ```
    Confirm the response includes one entry whose name matches the board
    (a `uid-...` name if `VIAL_KEYBOARD_UID` is compiled in, else a
    `5754-c401-...` fallback name).
 4. Fetch capabilities for that device name:
    ```bash
-   curl --unix-socket ~/.local/state/vialrgb-notify/api.sock http://localhost/devices/<name>
+   curl --unix-socket ~/.local/state/blinkenkeys/api.sock http://localhost/devices/<name>
    ```
    Confirm `led_count` and `positions` look plausible for the board's known
    matrix.
 5. Set key `2,2` to red and confirm it visibly lights up red on the board:
    ```bash
-   curl --unix-socket ~/.local/state/vialrgb-notify/api.sock \
+   curl --unix-socket ~/.local/state/blinkenkeys/api.sock \
      -X PUT -d '{"color":"#ff0000"}' \
      http://localhost/devices/<name>/keys/2,2
    ```
@@ -3558,7 +3558,7 @@ tree's `../qmk_vial`).
 7. With both keys from steps 5–6 still colored, physically unplug and
    replug the board. Confirm both colors reappear automatically within
    ~1-2 seconds, with no new API call — the reconnect-triggered redraw
-   (`internal/dispatcher`'s `RedrawReconnected`, driven by `cmd/vialrgbd`'s
+   (`internal/dispatcher`'s `RedrawReconnected`, driven by `cmd/blinkenkeysd`'s
    1s hotplug-poll loop). Also confirm `GET /devices` shows the *same* name
    as step 3 (not a new `-0`-suffixed name) — this is the untethered-rewire
    path (Task 6), not a fresh allocation.
@@ -3592,11 +3592,11 @@ silently dropped):
 - The optional TCP listener and its mandatory bearer token (Task 14's
   `main()` only binds the Unix socket listener) — when it is wired up, its
   documented default port is `:49994` (Task 13's note on `TCPListener`).
-- Wiring `config.Load` into `cmd/vialrgbd`'s `main()` (Task 14's note) — it
+- Wiring `config.Load` into `cmd/blinkenkeysd`'s `main()` (Task 14's note) — it
   currently uses hardcoded/env-var defaults instead.
 - Packaging/installation mechanics for the privilege model described in the
   design spec's Background section: the macOS LaunchAgent plist and the
-  Linux udev rule file. This plan implements `vialrgbd` as a plain binary
+  Linux udev rule file. This plan implements `blinkenkeysd` as a plain binary
   invoked directly (per Task 17's manual check) — it does not create or
   install a `launchd`/`systemd`/udev unit. Doing so is a packaging task, not
   a coding gap in Phase 1+2's architecture itself.
