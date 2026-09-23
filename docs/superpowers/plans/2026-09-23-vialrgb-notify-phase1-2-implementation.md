@@ -2,23 +2,28 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Implement the Go `connectord`/`restd` daemon pair described in
+**Goal:** Implement the Go `vialrgbd` daemon described in
 `docs/superpowers/specs/2026-09-21-vialrgb-notify-phase1-2-design.md`: set a
 single key's color on one HID device (Phase 1), and enumerate/report
 capabilities of all connected Vial-capable devices with stable names (Phase 2).
 
-**Architecture:** Two long-lived processes. `connectord` (privileged, does
-only raw HID I/O via `github.com/sstallion/go-hid`) enumerates Vial-capable
-devices, spawns `restd` as a child process, and hands it one end of an
-anonymous `socketpair` via `exec.Cmd.ExtraFiles`. `restd` (unprivileged) runs
-an HTTP server and a single dispatcher goroutine that owns the socketpair
-exclusively, serializing and batching all device operations. See the design
-spec for full rationale — this plan implements it as specified without
-reopening any of its decisions.
+**Architecture:** One long-lived process, `vialrgbd`. It enumerates
+Vial-capable devices directly via `github.com/sstallion/go-hid` (no
+privilege separation — the design spec's revision history explains why the
+original `connectord`/`restd` split was dropped: macOS's Input Monitoring
+TCC grant, the reason for the split, turns out not to gate raw HID access to
+a vendor-defined usage page at all), runs an HTTP server, and owns a single
+dispatcher goroutine that serializes and batches all device operations
+against the open HID handles. The dispatcher also maintains an in-memory
+last-known-good color cache per device and periodically (plus on
+reconnect) redraws it, since VialRGB Direct-mode colors don't survive a
+device reset and can't be read back. See the design spec for full
+rationale — this plan implements it as specified without reopening any of
+its decisions.
 
 **Tech Stack:** Go 1.27, `github.com/sstallion/go-hid` (raw HID via bundled
 hidapi C sources, cgo), `golang.org/x/image/colornames` (CSS/X11 color
-names), `gopkg.in/yaml.v3` (config), Go's stdlib `net/http` with the
+names), `github.com/goccy/go-yaml` (config), Go's stdlib `net/http` with the
 Go 1.22+ method+wildcard `ServeMux` (no external router dependency needed).
 
 ---
@@ -61,14 +66,22 @@ none of it is guessed:
   bytes, `[start_led_lo, start_led_hi, count, H0,S0,V0, H1,S1,V1, ...]`, up to
   9 LEDs (27 usable bytes ÷ 3 bytes/LED) per the design spec's own citation of
   `vialrgb.c`'s `fast_set_leds` comment.
-- **`syscall.Socketpair(domain, typ, proto int) (fd [2]int, err error)`** and
-  **`exec.Cmd.ExtraFiles []*os.File`** (doc: "entry i becomes file descriptor
-  3+i") are both real, current Go stdlib APIs, confirmed against
-  `golang.org/x/go`'s source.
 - **Current stable Go is 1.27.1** (confirmed via both `brew info go` and
   `https://go.dev/VERSION?m=text`).
 - Module path `github.com/seefood/vialrgb-notify` — confirmed with the user
   (matches their `gh` CLI identity; this repo isn't pushed to GitHub yet).
+- **`github.com/goccy/go-yaml` v1.19.2**: actively maintained (unlike
+  `gopkg.in/yaml.v3`, which is archived/unmaintained upstream), zero
+  non-stdlib dependencies, requires Go 1.21+. Its top-level `Marshal`/
+  `Unmarshal` API and `yaml:"..."` struct-tag conventions are drop-in
+  compatible with `yaml.v3` for the plain-struct usage in Task 13's
+  `config.Load` — no call-site changes needed beyond the import path.
+- **No privilege drop is needed in the single-binary `vialrgbd` design**: there
+  is no spawned child to drop, and the design spec's explicit ban on calling
+  `syscall.Setuid`/`Setgid` on an already-running process (broken across Go's
+  OS threads, `golang/go#1435`) means `vialrgbd` itself can never safely drop
+  out of a root fallback either — so Task 14's `warnIfRootFallback` only logs
+  a warning, it does not attempt to de-escalate.
 
 ---
 
@@ -104,7 +117,7 @@ and a `go` directive matching the installed toolchain.
 ```bash
 go get github.com/sstallion/go-hid@v0.15.0
 go get golang.org/x/image@v0.46.0
-go get gopkg.in/yaml.v3@v3.0.1
+go get github.com/goccy/go-yaml@v1.19.2
 go mod tidy
 ```
 
@@ -796,32 +809,18 @@ func TestFilterVial(t *testing.T) {
 	}
 }
 
-func TestAssignNamesUnique(t *testing.T) {
-	devices := []Identity{
-		{HasUID: true, UID: [8]byte{1, 2, 3, 4, 5, 6, 7, 8}},
-		{VendorID: 0x5754, ProductID: 0xC401, Path: "/dev/hidraw3"},
+func TestBaseName(t *testing.T) {
+	got := BaseName(Identity{HasUID: true, UID: [8]byte{1, 2, 3, 4, 5, 6, 7, 8}})
+	if got != "uid-0102030405060708" {
+		t.Errorf("BaseName(uid) = %q", got)
 	}
-	got := AssignNames(devices)
-	if got[0].Name != "uid-0102030405060708" {
-		t.Errorf("got[0].Name = %q", got[0].Name)
+	got = BaseName(Identity{VendorID: 0x5754, ProductID: 0xC401, Path: "/dev/hidraw3"})
+	if got != "5754-c401-/dev/hidraw3" {
+		t.Errorf("BaseName(vid/pid+path) = %q", got)
 	}
-	if got[1].Name != "5754-c401-/dev/hidraw3" {
-		t.Errorf("got[1].Name = %q", got[1].Name)
-	}
-}
-
-func TestAssignNamesDedup(t *testing.T) {
-	devices := []Identity{
-		{VendorID: 0x5754, ProductID: 0xC401},
-		{VendorID: 0x5754, ProductID: 0xC401},
-		{VendorID: 0x5754, ProductID: 0xC401},
-	}
-	got := AssignNames(devices)
-	want := []string{"5754-c401-0", "5754-c401-1", "5754-c401-2"}
-	for i, w := range want {
-		if got[i].Name != w {
-			t.Errorf("got[%d].Name = %q, want %q", i, got[i].Name, w)
-		}
+	got = BaseName(Identity{VendorID: 0x5754, ProductID: 0xC401})
+	if got != "5754-c401" {
+		t.Errorf("BaseName(vid/pid only) = %q", got)
 	}
 }
 ```
@@ -829,10 +828,10 @@ func TestAssignNamesDedup(t *testing.T) {
 - [ ] **Step 2: Run tests, verify they fail**
 
 ```bash
-go test ./internal/hid/... -run TestFilterVial -run TestAssignNames
+go test ./internal/hid/... -run TestFilterVial -run TestBaseName
 ```
 
-Expected: `FAIL` — `Info`, `filterVial`, `Identity`, `AssignNames` undefined.
+Expected: `FAIL` — `Info`, `filterVial`, `Identity`, `BaseName` undefined.
 
 - [ ] **Step 3: Implement**
 
@@ -912,8 +911,8 @@ func Open(path string) (*Device, error) {
 	return newDevice(raw), nil
 }
 
-// Controller is the subset of Device's behavior cmd/connectord's RPC layer
-// depends on, so tests can substitute a fake without opening real hardware.
+// Controller is the subset of Device's behavior internal/dispatcher depends
+// on, so tests can substitute a fake without opening real hardware.
 type Controller interface {
 	SetKeys(keys []KeyColor) error
 	GetNumberLEDs() (uint16, error)
@@ -922,7 +921,9 @@ type Controller interface {
 }
 
 // Identity is a resolved identity for one attached device, gathered by
-// connectord at startup (enumeration path plus a GetKeyboardUID probe).
+// vialrgbd's startup enumeration (and re-gathered on each hotplug poll —
+// see internal/dispatcher's Registry) via the enumeration path plus a
+// GetKeyboardUID probe.
 type Identity struct {
 	Path      string
 	VendorID  uint16
@@ -931,39 +932,16 @@ type Identity struct {
 	HasUID    bool
 }
 
-// NamedIdentity pairs a resolved Identity with connectord's assigned stable
-// name.
-type NamedIdentity struct {
-	Name string
-	Identity
-}
-
-// AssignNames computes each device's stable name — Vial UID if available,
-// else VID/PID + platform path, else VID/PID alone — then deduplicates
-// only actually-colliding names (e.g. two identical boards) with -0, -1, ...
-// suffixes, in input (enumeration) order.
-func AssignNames(devices []Identity) []NamedIdentity {
-	base := make([]string, len(devices))
-	total := make(map[string]int)
-	for i, d := range devices {
-		base[i] = baseName(d)
-		total[base[i]]++
-	}
-
-	next := make(map[string]int)
-	out := make([]NamedIdentity, len(devices))
-	for i, d := range devices {
-		name := base[i]
-		if total[name] > 1 {
-			name = fmt.Sprintf("%s-%d", name, next[base[i]])
-			next[base[i]]++
-		}
-		out[i] = NamedIdentity{Name: name, Identity: d}
-	}
-	return out
-}
-
-func baseName(d Identity) string {
+// BaseName computes d's pre-dedup identity key: Vial UID if available, else
+// VID/PID + platform path, else VID/PID alone. Exported so
+// internal/dispatcher's Registry (Task 6) can use it directly as the sole
+// naming/identity-matching primitive for its stateful Reconcile — dedup
+// suffixing (-0, -1, ...) and reconnect/"untethered" rewire matching both
+// live in Registry now, since both need state that persists across polls
+// (which name is already taken; which slot is untethered) rather than a
+// stateless one-shot pass over a single enumeration snapshot. Two Identity
+// values are considered the same device iff BaseName(a) == BaseName(b).
+func BaseName(d Identity) string {
 	switch {
 	case d.HasUID:
 		return fmt.Sprintf("uid-%x", d.UID)
@@ -983,7 +961,7 @@ go test ./internal/hid/... -v
 
 Expected: all `PASS`. Note `Enumerate`/`Open` themselves are not unit tested
 here (they call cgo-backed go-hid against real hardware) — they're exercised
-by Task 19's manual/gated hardware check, per the design spec's testing plan.
+by Task 17's manual/gated hardware check, per the design spec's testing plan.
 
 - [ ] **Step 5: Commit**
 
@@ -993,296 +971,300 @@ git commit -m "Add internal/hid enumeration, Open, Controller, and stable-name r
 ```
 
 ---
-
-## Task 6: `internal/ipc` — length-prefixed JSON framing
+## Task 6: `internal/dispatcher` — core types, device registry, color cache
 
 **Files:**
-- Create: `internal/ipc/frame.go`
-- Test: `internal/ipc/frame_test.go`
+- Create: `internal/dispatcher/types.go`
+- Create: `internal/dispatcher/registry.go`
+- Create: `internal/dispatcher/registry_test.go`
+- Create: `internal/dispatcher/cache.go`
+- Create: `internal/dispatcher/cache_test.go`
+
+This task lays down `internal/dispatcher`'s data structures before the
+single-writer goroutine (Task 7) that operates on them. `Registry` tracks
+every device `vialrgbd` has ever seen by name, connected or not — replacing
+the old `connectord`/`restd` split's need for anything wire-level, since
+`vialrgbd` calls `hid.Controller` methods directly, in-process. Its
+`Reconcile` method is both the naming authority (using `hid.BaseName` for
+identity plus its own `-0`/`-1`/`-2` dedup suffixing, scoped across every
+name Registry has ever assigned rather than one enumeration snapshot, since
+rewire/eviction need cross-poll state a stateless per-snapshot naming pass
+can't hold) and how reconnect detection works, per the design
+spec's "State persistence & refresh" section, which this task's step 2 also
+amends with the "untethered" refinement below. `Cache` is the last-known-good
+color store that same section requires, since VialRGB Direct-mode colors
+live in the keyboard's RAM only and can't be read back after a
+reset/replug/brownout.
+
+**Untethered rewire semantics.** A device that disconnects doesn't lose its
+name or cache immediately: its slot transitions from `connected` to
+`untethered` (cache retained, disconnect timestamp recorded) rather than
+being freed. On the next `Reconcile`, a present device is matched against
+existing slots by `hid.BaseName(identity)` equality:
+- If the match is `untethered`, it's a rewire: the slot goes back to
+  `connected` under the *same* name, attached to the new (post-replug)
+  `hid.Controller`, and is reported in `Reconnected` so Task 9's redraw loop
+  replays its cached colors onto the reconnected hardware.
+- If the match is already `connected` — a second, simultaneously-present
+  device that happens to compute the same base identity — it is never
+  stolen; the newly-seen device gets the next dedup-suffixed name instead,
+  with a fresh, empty cache, exactly as if it were the first time that
+  identity had ever collided.
+
+Any `untethered` slot older than `UntetheredMaxAge` (24h) is deleted on the
+`Reconcile` call that first notices the age, reported in `Evicted` so the
+caller can also forget its `Cache` entry — a later device presenting that
+same identity is then a fresh allocation, not a rewire, and starts with an
+empty cache. `Reconcile` runs on `cmd/vialrgbd`'s existing 1s hotplug-poll
+cadence (Task 14), so eviction is checked at least that often — tighter than
+"the same 5s ticker that drives periodic redraw" would give, and without
+needing a third, separate ticker.
+
+One known, accepted limitation: the VID/PID-alone identity tier (used only
+when a device's platform path is unavailable) can't distinguish two
+physically distinct devices at all, so which of two such simultaneously-open
+devices rewires into a given pre-existing slot on a later poll is
+unspecified — this is an existing limitation of that fallback tier's
+ambiguity (see Task 5), not something Reconcile's rewire logic introduces.
 
 - [ ] **Step 1: Write the failing tests**
 
-`internal/ipc/frame_test.go`:
-
+`internal/dispatcher/registry_test.go`:
 ```go
-package ipc
+package dispatcher
 
 import (
-	"bytes"
-	"encoding/binary"
 	"testing"
+	"time"
+
+	"github.com/seefood/vialrgb-notify/internal/hid"
 )
 
-func TestFrameRoundTrip(t *testing.T) {
-	type payload struct {
-		Op string `json:"op"`
-	}
-	var buf bytes.Buffer
-	want := payload{Op: "SetKey"}
-	if err := WriteFrame(&buf, want); err != nil {
-		t.Fatalf("WriteFrame: %v", err)
-	}
-	var got payload
-	if err := ReadFrame(&buf, &got); err != nil {
-		t.Fatalf("ReadFrame: %v", err)
-	}
-	if got != want {
-		t.Errorf("got %+v, want %+v", got, want)
-	}
+// fakeController is reused by every test file in this package.
+type fakeController struct {
+	numLEDs   uint16
+	positions map[uint16][2]uint8
+	lastSet   []hid.KeyColor
+	setErr    error
 }
 
-func TestReadFrameOversized(t *testing.T) {
-	var buf bytes.Buffer
-	var lenBuf [4]byte
-	binary.BigEndian.PutUint32(lenBuf[:], maxFrameSize+1)
-	buf.Write(lenBuf[:])
-
-	var v any
-	if err := ReadFrame(&buf, &v); err == nil {
-		t.Fatal("ReadFrame: want error for oversized frame")
+func (f *fakeController) SetKeys(keys []hid.KeyColor) error {
+	if f.setErr != nil {
+		return f.setErr
 	}
-}
-
-func TestReadFrameShort(t *testing.T) {
-	buf := bytes.NewBufferString("ab") // shorter than the 4-byte length prefix
-	var v any
-	if err := ReadFrame(buf, &v); err == nil {
-		t.Fatal("ReadFrame: want error for truncated length prefix")
-	}
-}
-```
-
-- [ ] **Step 2: Run tests, verify they fail**
-
-```bash
-go test ./internal/ipc/...
-```
-
-Expected: `FAIL` — `WriteFrame`, `ReadFrame`, `maxFrameSize` undefined.
-
-- [ ] **Step 3: Implement**
-
-`internal/ipc/frame.go`:
-
-```go
-// Package ipc implements the connectord<->restd internal link: a
-// length-prefixed JSON framing over the anonymous socketpair connectord
-// creates at startup, plus the Request/Response types both binaries share.
-package ipc
-
-import (
-	"encoding/binary"
-	"encoding/json"
-	"fmt"
-	"io"
-)
-
-// maxFrameSize is a generous upper bound guarding against a corrupt length
-// prefix causing an unbounded allocation.
-const maxFrameSize = 1 << 20 // 1 MiB
-
-// WriteFrame writes v as a length-prefixed JSON message: a 4-byte
-// big-endian length prefix followed by that many bytes of JSON.
-func WriteFrame(w io.Writer, v any) error {
-	body, err := json.Marshal(v)
-	if err != nil {
-		return fmt.Errorf("ipc: marshal: %w", err)
-	}
-	var lenBuf [4]byte
-	binary.BigEndian.PutUint32(lenBuf[:], uint32(len(body)))
-	if _, err := w.Write(lenBuf[:]); err != nil {
-		return fmt.Errorf("ipc: write length: %w", err)
-	}
-	if _, err := w.Write(body); err != nil {
-		return fmt.Errorf("ipc: write body: %w", err)
-	}
+	f.lastSet = keys
 	return nil
 }
 
-// ReadFrame reads one length-prefixed JSON message written by WriteFrame
-// into v.
-func ReadFrame(r io.Reader, v any) error {
-	var lenBuf [4]byte
-	if _, err := io.ReadFull(r, lenBuf[:]); err != nil {
-		return fmt.Errorf("ipc: read length: %w", err)
+func (f *fakeController) GetNumberLEDs() (uint16, error) { return f.numLEDs, nil }
+
+func (f *fakeController) GetLEDInfo(index uint16) (uint8, uint8, error) {
+	pos := f.positions[index]
+	return pos[0], pos[1], nil
+}
+
+func (f *fakeController) Close() error { return nil }
+
+// registryWithConnected builds a Registry with one pre-seeded Connected slot
+// under exactly the given name, bypassing Reconcile's identity-based naming.
+// Used by dispatcher_test.go and redraw_test.go (Tasks 7 and 9), which only
+// care about dispatch/redraw behavior for a known device name — this file is
+// what actually tests Reconcile's naming/rewire/eviction logic.
+func registryWithConnected(name string, ctrl hid.Controller) *Registry {
+	return &Registry{slots: map[string]*slot{name: {base: name, state: stateConnected, ctrl: ctrl}}}
+}
+
+// registryWithConnectedMulti is registryWithConnected for more than one
+// pre-seeded device at once.
+func registryWithConnectedMulti(devices map[string]hid.Controller) *Registry {
+	r := &Registry{slots: make(map[string]*slot, len(devices))}
+	for name, ctrl := range devices {
+		r.slots[name] = &slot{base: name, state: stateConnected, ctrl: ctrl}
 	}
-	n := binary.BigEndian.Uint32(lenBuf[:])
-	if n > maxFrameSize {
-		return fmt.Errorf("ipc: frame of %d bytes exceeds %d-byte limit", n, maxFrameSize)
+	return r
+}
+
+func TestRegistryReconcileAssignsNameAndDetectsReconnect(t *testing.T) {
+	r := NewRegistry()
+	id := hid.Identity{HasUID: true, UID: [8]byte{1}}
+
+	res := r.Reconcile([]PresentDevice{{Identity: id, Ctrl: &fakeController{}}}, time.Now(), UntetheredMaxAge)
+	if len(res.Devices) != 1 {
+		t.Fatalf("first Reconcile: Devices = %+v, want 1 entry", res.Devices)
 	}
-	body := make([]byte, n)
-	if _, err := io.ReadFull(r, body); err != nil {
-		return fmt.Errorf("ipc: read body: %w", err)
+	var name string
+	for n := range res.Devices {
+		name = n
 	}
-	if err := json.Unmarshal(body, v); err != nil {
-		return fmt.Errorf("ipc: unmarshal: %w", err)
+	if len(res.Reconnected) != 0 {
+		t.Fatalf("first Reconcile: Reconnected = %v, want none (fresh slot, not a rewire — nothing to redraw from an empty cache)", res.Reconnected)
 	}
-	return nil
+
+	res = r.Reconcile([]PresentDevice{{Identity: id, Ctrl: &fakeController{}}}, time.Now(), UntetheredMaxAge)
+	if len(res.Reconnected) != 0 {
+		t.Fatalf("second Reconcile (still present): Reconnected = %v, want none", res.Reconnected)
+	}
+
+	res = r.Reconcile(nil, time.Now(), UntetheredMaxAge)
+	if len(res.Devices) != 0 {
+		t.Fatalf("Reconcile after disconnect: Devices = %+v, want none (untethered, not gone)", res.Devices)
+	}
+
+	res = r.Reconcile([]PresentDevice{{Identity: id, Ctrl: &fakeController{}}}, time.Now(), UntetheredMaxAge)
+	if len(res.Reconnected) != 1 || res.Reconnected[0] != name {
+		t.Fatalf("Reconcile after reconnect: Reconnected = %v, want [%s] (rewire)", res.Reconnected, name)
+	}
+}
+
+func TestRegistryReconcileDoesNotStealConnectedSlot(t *testing.T) {
+	r := NewRegistry()
+	id := hid.Identity{VendorID: 0x5754, ProductID: 0xc401, Path: "same-path-edge-case"}
+
+	res := r.Reconcile([]PresentDevice{
+		{Identity: id, Ctrl: &fakeController{}},
+		{Identity: id, Ctrl: &fakeController{}},
+	}, time.Now(), UntetheredMaxAge)
+
+	if len(res.Devices) != 2 {
+		t.Fatalf("Devices = %+v, want 2 entries (one per simultaneous device)", res.Devices)
+	}
+	names := make([]string, 0, 2)
+	for n := range res.Devices {
+		names = append(names, n)
+	}
+	if names[0] == names[1] {
+		t.Fatalf("both devices got name %q, want distinct names (second must not steal the first's slot)", names[0])
+	}
+}
+
+func TestRegistryReconcileEvictsStaleUntethered(t *testing.T) {
+	r := NewRegistry()
+	id := hid.Identity{HasUID: true, UID: [8]byte{9}}
+	t0 := time.Now()
+
+	res := r.Reconcile([]PresentDevice{{Identity: id, Ctrl: &fakeController{}}}, t0, UntetheredMaxAge)
+	var name string
+	for n := range res.Devices {
+		name = n
+	}
+
+	r.Reconcile(nil, t0.Add(time.Minute), UntetheredMaxAge) // disconnect
+
+	res = r.Reconcile([]PresentDevice{{Identity: id, Ctrl: &fakeController{}}}, t0.Add(time.Hour), UntetheredMaxAge)
+	if len(res.Reconnected) != 1 || res.Reconnected[0] != name {
+		t.Fatalf("reconnect before eviction: Reconnected = %v, want [%s] (still within 24h)", res.Reconnected, name)
+	}
+
+	r.Reconcile(nil, t0.Add(2*time.Hour), UntetheredMaxAge) // disconnect again
+
+	evictRes := r.Reconcile(nil, t0.Add(2*time.Hour+UntetheredMaxAge+time.Minute), UntetheredMaxAge)
+	if len(evictRes.Evicted) != 1 || evictRes.Evicted[0] != name {
+		t.Fatalf("Evicted = %v, want [%s] (untethered past UntetheredMaxAge)", evictRes.Evicted, name)
+	}
+
+	freshRes := r.Reconcile([]PresentDevice{{Identity: id, Ctrl: &fakeController{}}}, t0.Add(3*time.Hour), UntetheredMaxAge)
+	if len(freshRes.Reconnected) != 0 {
+		t.Errorf("Reconnected after eviction = %v, want none (fresh slot, not a rewire — old cache must not be reused)", freshRes.Reconnected)
+	}
+	if len(freshRes.Devices) != 1 {
+		t.Errorf("Devices after post-eviction reconnect = %+v, want 1 entry", freshRes.Devices)
+	}
+}
+
+func TestRegistryGetAndSummaries(t *testing.T) {
+	r := NewRegistry()
+	r.Reconcile([]PresentDevice{{Identity: hid.Identity{HasUID: true, UID: [8]byte{1}}, Ctrl: &fakeController{}}}, time.Now(), UntetheredMaxAge)
+
+	if _, ok := r.Get("missing"); ok {
+		t.Error("Get(missing) = true, want false")
+	}
+	var name string
+	for _, s := range r.Summaries() {
+		name = s.Name
+	}
+	if _, ok := r.Get(name); !ok {
+		t.Errorf("Get(%s) = false, want true", name)
+	}
+	summaries := r.Summaries()
+	if len(summaries) != 1 || summaries[0].Name != name || !summaries[0].Connected {
+		t.Errorf("Summaries = %+v", summaries)
+	}
 }
 ```
 
-- [ ] **Step 4: Run tests, verify they pass**
-
-```bash
-go test ./internal/ipc/... -v
-```
-
-Expected: all `PASS`.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add internal/ipc
-git commit -m "Add internal/ipc: length-prefixed JSON framing"
-```
-
----
-
-## Task 7: `internal/ipc` — Request/Response types and `NetConn`
-
-**Files:**
-- Create: `internal/ipc/types.go`
-- Create: `internal/ipc/conn.go`
-- Test: `internal/ipc/types_test.go`
-
-- [ ] **Step 1: Write the failing test**
-
-`internal/ipc/types_test.go`:
-
+`internal/dispatcher/cache_test.go`:
 ```go
-package ipc
+package dispatcher
 
 import (
-	"bytes"
-	"encoding/json"
+	"reflect"
 	"testing"
+
+	"github.com/seefood/vialrgb-notify/internal/hid"
 )
 
-func TestRequestResponseRoundTrip(t *testing.T) {
-	args := SetKeyArgs{Device: "cxt12e4-0", Index: 5, H: 0, S: 255, V: 255}
-	argsJSON, err := json.Marshal(args)
-	if err != nil {
-		t.Fatalf("marshal args: %v", err)
-	}
-	req := Request{Op: OpSetKey, Args: argsJSON}
-
-	var buf bytes.Buffer
-	if err := WriteFrame(&buf, req); err != nil {
-		t.Fatalf("WriteFrame: %v", err)
+func TestCacheUpdateAndSnapshot(t *testing.T) {
+	c := NewCache()
+	if got := c.Snapshot("a"); got != nil {
+		t.Fatalf("Snapshot before any Update = %v, want nil", got)
 	}
 
-	var gotReq Request
-	if err := ReadFrame(&buf, &gotReq); err != nil {
-		t.Fatalf("ReadFrame: %v", err)
+	c.Update("a", []hid.KeyColor{{Index: 2, H: 1, S: 2, V: 3}})
+	c.Update("a", []hid.KeyColor{{Index: 0, H: 4, S: 5, V: 6}})
+	c.Update("a", []hid.KeyColor{{Index: 2, H: 9, S: 9, V: 9}}) // overwrite index 2
+
+	got := c.Snapshot("a")
+	want := []hid.KeyColor{{Index: 0, H: 4, S: 5, V: 6}, {Index: 2, H: 9, S: 9, V: 9}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("Snapshot = %+v, want %+v", got, want)
 	}
-	if gotReq.Op != OpSetKey {
-		t.Errorf("Op = %q, want %q", gotReq.Op, OpSetKey)
+}
+
+func TestCacheSnapshotOtherDeviceUnaffected(t *testing.T) {
+	c := NewCache()
+	c.Update("a", []hid.KeyColor{{Index: 0}})
+	if got := c.Snapshot("b"); got != nil {
+		t.Errorf("Snapshot(b) = %v, want nil", got)
 	}
-	var gotArgs SetKeyArgs
-	if err := json.Unmarshal(gotReq.Args, &gotArgs); err != nil {
-		t.Fatalf("unmarshal args: %v", err)
-	}
-	if gotArgs != args {
-		t.Errorf("args = %+v, want %+v", gotArgs, args)
+}
+
+func TestCacheForget(t *testing.T) {
+	c := NewCache()
+	c.Update("a", []hid.KeyColor{{Index: 0}})
+	c.Forget("a")
+	if got := c.Snapshot("a"); got != nil {
+		t.Errorf("Snapshot after Forget = %v, want nil", got)
 	}
 }
 ```
 
-- [ ] **Step 2: Run test, verify it fails**
+Run: `go test ./internal/dispatcher/...` — fails, package doesn't exist yet.
 
-```bash
-go test ./internal/ipc/... -run TestRequestResponseRoundTrip
-```
+- [ ] **Step 2: Implement**
 
-Expected: `FAIL` — `SetKeyArgs`, `Request`, `OpSetKey` undefined.
-
-- [ ] **Step 3: Implement**
-
-`internal/ipc/types.go`:
-
+`internal/dispatcher/types.go`:
 ```go
-package ipc
+// Package dispatcher is vialrgbd's single-writer "traffic cop" for the HID
+// handle: every other goroutine (HTTP handlers; the periodic/reconnect
+// redraw loops) submits work through the Dispatcher and never touches a
+// hid.Controller directly, since hidapi is not guaranteed safe under
+// concurrent access to the same handle.
+package dispatcher
 
-import "encoding/json"
+import "errors"
 
-// Op identifies which connectord RPC a Request invokes.
-type Op string
+// ErrDeviceNotFound is returned for a device name not present in the
+// registry — internal/api maps this to a 404.
+var ErrDeviceNotFound = errors.New("dispatcher: unknown device")
 
-const (
-	OpSetKey          Op = "SetKey"
-	OpSetKeys         Op = "SetKeys"
-	OpListDevices     Op = "ListDevices"
-	OpGetCapabilities Op = "GetCapabilities"
-)
+// ErrQueueFull is returned when the dispatcher's request queue is at
+// capacity — internal/api maps this to a 503.
+var ErrQueueFull = errors.New("dispatcher: request queue full")
 
-// ErrorCode classifies a failed Response, so restd's HTTP layer can map it
-// to the right status code per the design spec's error table.
-type ErrorCode string
-
-const (
-	ErrBadRequest  ErrorCode = "bad_request"
-	ErrNotFound    ErrorCode = "not_found"
-	ErrUnavailable ErrorCode = "unavailable"
-)
-
-// Request is one call across the connectord<->restd link. Args holds the
-// op-specific argument struct (SetKeyArgs, SetKeysArgs, ...), deferred with
-// json.RawMessage so the two sides don't need a shared interface type.
-type Request struct {
-	Op   Op              `json:"op"`
-	Args json.RawMessage `json:"args"`
-}
-
-// Response is connectord's reply. Data holds the op-specific result struct,
-// present only when OK is true.
-type Response struct {
-	OK    bool            `json:"ok"`
-	Code  ErrorCode       `json:"code,omitempty"`
-	Error string          `json:"error,omitempty"`
-	Data  json.RawMessage `json:"data,omitempty"`
-}
-
-// SetKeyArgs sets one LED. Index is a resolved LED index (restd's api layer
-// resolves the client-facing row,col into this via a cached
-// GetCapabilities result) — connectord's RPC surface deals in LED index
-// only, matching what VialRGB's wire protocol actually addresses.
-type SetKeyArgs struct {
-	Device string `json:"device"`
-	Index  uint16 `json:"index"`
-	H      uint8  `json:"h"`
-	S      uint8  `json:"s"`
-	V      uint8  `json:"v"`
-}
-
-// SetKeysArgs batches multiple same-device SetKey calls (internal/dispatcher
-// coalesces contiguous-index requests into this before sending).
-type SetKeysArgs struct {
-	Device string     `json:"device"`
-	Keys   []KeyColor `json:"keys"`
-}
-
-// KeyColor is one LED's target color within a SetKeysArgs batch.
-type KeyColor struct {
-	Index uint16 `json:"index"`
-	H     uint8  `json:"h"`
-	S     uint8  `json:"s"`
-	V     uint8  `json:"v"`
-}
-
-// DeviceSummary is one entry in a ListDevices reply.
+// DeviceSummary is one entry in a ListDevices result.
 type DeviceSummary struct {
 	Name      string `json:"name"`
 	Connected bool   `json:"connected"`
-}
-
-// ListDevicesResult is ListDevices's reply payload.
-type ListDevicesResult struct {
-	Devices []DeviceSummary `json:"devices"`
-}
-
-// GetCapabilitiesArgs names the device to query.
-type GetCapabilitiesArgs struct {
-	Device string `json:"device"`
 }
 
 // LEDPosition is one LED's matrix location, as reported by VialRGB's
@@ -1293,326 +1275,629 @@ type LEDPosition struct {
 	Col   uint8  `json:"col"`
 }
 
-// Capabilities is GetCapabilities's reply payload.
+// Capabilities is GetCapabilities's result.
 type Capabilities struct {
 	LEDCount  int           `json:"led_count"`
 	Positions []LEDPosition `json:"positions"`
 }
 ```
 
-`internal/ipc/conn.go`:
-
+`internal/dispatcher/registry.go`:
 ```go
-package ipc
+package dispatcher
 
-import "net"
+import (
+	"fmt"
+	"sync"
+	"time"
 
-// Conn is anything that can send/receive length-prefixed JSON frames — the
-// socketpair connection wrapped by both connectord and restd.
-type Conn interface {
-	WriteFrame(v any) error
-	ReadFrame(v any) error
+	"github.com/seefood/vialrgb-notify/internal/hid"
+)
+
+// UntetheredMaxAge is how long a disconnected device's name/cache slot stays
+// available for reconnect-rewire before Reconcile deletes it outright, per
+// the design spec's "State persistence & refresh" untethered-rewire note.
+const UntetheredMaxAge = 24 * time.Hour
+
+type slotState int
+
+const (
+	stateConnected slotState = iota
+	stateUntethered
+)
+
+// slot is one name's assignment history: the base identity it was assigned
+// from (for matching future Reconcile calls), its current state, and — only
+// meaningful in the corresponding state — its live controller or the time it
+// went untethered.
+type slot struct {
+	base           string
+	state          slotState
+	ctrl           hid.Controller // set only while state == stateConnected
+	disconnectedAt time.Time      // set only while state == stateUntethered
 }
 
-// NetConn adapts a net.Conn (the inherited socketpair fd, wrapped via
-// net.FileConn) into Conn. Embedding net.Conn also gives it SetDeadline,
-// which internal/dispatcher's Conn interface additionally requires.
-type NetConn struct {
-	net.Conn
+// PresentDevice pairs one currently-open device's resolved identity with its
+// controller for a single Reconcile call. Reconcile — not the caller —
+// decides its name.
+type PresentDevice struct {
+	Identity hid.Identity
+	Ctrl     hid.Controller
 }
 
-func (c NetConn) WriteFrame(v any) error { return WriteFrame(c.Conn, v) }
-func (c NetConn) ReadFrame(v any) error  { return ReadFrame(c.Conn, v) }
+// ReconcileResult is Reconcile's outcome for one poll cycle.
+type ReconcileResult struct {
+	// Devices is every slot now Connected: name -> controller.
+	Devices map[string]hid.Controller
+	// Reconnected is every name rewired from an Untethered slot back to
+	// Connected this cycle — the caller should redraw these from Cache.
+	Reconnected []string
+	// Evicted is every name whose Untethered slot just aged past maxAge and
+	// was deleted this cycle — the caller should also call Cache.Forget on
+	// each of these.
+	Evicted []string
+}
+
+// Registry is vialrgbd's persistent name-assignment and presence state: name
+// -> slot. Unlike a stateless per-poll naming pass, Registry remembers slots
+// across polls so a device that disconnects doesn't lose its name or cached
+// colors immediately — see Reconcile.
+type Registry struct {
+	mu    sync.Mutex
+	slots map[string]*slot
+}
+
+// NewRegistry creates an empty Registry.
+func NewRegistry() *Registry {
+	return &Registry{slots: make(map[string]*slot)}
+}
+
+// Get returns the open controller for name, if currently Connected.
+func (r *Registry) Get(name string) (hid.Controller, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	s, ok := r.slots[name]
+	if !ok || s.state != stateConnected {
+		return nil, false
+	}
+	return s.ctrl, true
+}
+
+// Summaries lists every known device, Connected or Untethered.
+func (r *Registry) Summaries() []DeviceSummary {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]DeviceSummary, 0, len(r.slots))
+	for name, s := range r.slots {
+		out = append(out, DeviceSummary{Name: name, Connected: s.state == stateConnected})
+	}
+	return out
+}
+
+// Reconcile resolves present's identities to names for one poll cycle: a
+// present device matching an existing Untethered slot's base identity
+// rewires into it (reported in Reconnected, so the caller replays its
+// retained Cache entry), a present device matching an already-Connected
+// slot's identity never steals it and instead gets a fresh dedup-suffixed
+// name with an implicitly empty cache, and a present device matching no
+// existing slot gets a brand-new one. Dedup suffixing (-0, -1, ...) is scoped
+// across every name Registry has ever assigned, not just this cycle's
+// present set, so a name freed by eviction can be reused but a still-live
+// name never collides.
+//
+// Every existing slot not claimed by a PresentDevice this cycle transitions
+// from Connected to Untethered (disconnectedAt = now); every Untethered slot
+// already older than maxAge is deleted and reported in Evicted.
+func (r *Registry) Reconcile(present []PresentDevice, now time.Time, maxAge time.Duration) ReconcileResult {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	claimed := make(map[string]bool, len(r.slots))
+	usedNames := make(map[string]bool, len(r.slots))
+	for name := range r.slots {
+		usedNames[name] = true
+	}
+	nextSuffix := make(map[string]int)
+
+	var reconnected []string
+	for _, pd := range present {
+		base := hid.BaseName(pd.Identity)
+
+		if name, ok := r.findUnclaimedByBase(base, claimed); ok {
+			s := r.slots[name]
+			claimed[name] = true
+			s.ctrl = pd.Ctrl
+			if s.state == stateUntethered {
+				s.state = stateConnected
+				s.disconnectedAt = time.Time{}
+				reconnected = append(reconnected, name)
+			}
+			continue
+		}
+
+		name := base
+		if usedNames[name] {
+			for {
+				candidate := fmt.Sprintf("%s-%d", base, nextSuffix[base])
+				nextSuffix[base]++
+				if !usedNames[candidate] {
+					name = candidate
+					break
+				}
+			}
+		}
+		usedNames[name] = true
+		claimed[name] = true
+		r.slots[name] = &slot{base: base, state: stateConnected, ctrl: pd.Ctrl}
+	}
+
+	var evicted []string
+	for name, s := range r.slots {
+		if claimed[name] {
+			continue
+		}
+		switch s.state {
+		case stateConnected:
+			s.state = stateUntethered
+			s.ctrl = nil
+			s.disconnectedAt = now
+		case stateUntethered:
+			if now.Sub(s.disconnectedAt) > maxAge {
+				delete(r.slots, name)
+				evicted = append(evicted, name)
+			}
+		}
+	}
+
+	devices := make(map[string]hid.Controller)
+	for name, s := range r.slots {
+		if s.state == stateConnected {
+			devices[name] = s.ctrl
+		}
+	}
+
+	return ReconcileResult{Devices: devices, Reconnected: reconnected, Evicted: evicted}
+}
+
+// findUnclaimedByBase returns the name of an existing, not-yet-claimed-this-
+// cycle slot whose base identity matches base, if any. When more than one
+// unclaimed slot shares an identical base string — only possible via the
+// VID/PID-alone identity tier's inherent ambiguity (see Task 5) — which one
+// matches is unspecified; this is that tier's pre-existing limitation, not a
+// property Reconcile adds.
+func (r *Registry) findUnclaimedByBase(base string, claimed map[string]bool) (string, bool) {
+	for name, s := range r.slots {
+		if claimed[name] || s.base != base {
+			continue
+		}
+		return name, true
+	}
+	return "", false
+}
 ```
 
-- [ ] **Step 4: Run test, verify it passes**
+`internal/dispatcher/cache.go`:
+```go
+package dispatcher
 
-```bash
-go test ./internal/ipc/... -v
+import (
+	"sort"
+	"sync"
+
+	"github.com/seefood/vialrgb-notify/internal/hid"
+)
+
+// Cache remembers the last color successfully written to each key of each
+// device, since VialRGB Direct-mode colors live in the keyboard's RAM only
+// and are lost on any reset/replug/brownout with no way to read them back
+// (design spec's "State persistence & refresh"). Not persisted to disk — on
+// a vialrgbd restart there's nothing more trustworthy to reload than an
+// empty cache.
+type Cache struct {
+	mu       sync.Mutex
+	byDevice map[string]map[uint16]hid.KeyColor
+}
+
+// NewCache creates an empty Cache.
+func NewCache() *Cache {
+	return &Cache{byDevice: make(map[string]map[uint16]hid.KeyColor)}
+}
+
+// Update records keys as the last color successfully written to device.
+func (c *Cache) Update(device string, keys []hid.KeyColor) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	m, ok := c.byDevice[device]
+	if !ok {
+		m = make(map[uint16]hid.KeyColor)
+		c.byDevice[device] = m
+	}
+	for _, k := range keys {
+		m[k.Index] = k
+	}
+}
+
+// Snapshot returns every cached key/color for device, in ascending index
+// order (so callers can batch contiguous runs the same way live SetKey
+// traffic does), or nil if the device has never had a color set.
+func (c *Cache) Snapshot(device string) []hid.KeyColor {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	m, ok := c.byDevice[device]
+	if !ok || len(m) == 0 {
+		return nil
+	}
+	out := make([]hid.KeyColor, 0, len(m))
+	for _, k := range m {
+		out = append(out, k)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Index < out[j].Index })
+	return out
+}
+
+// Forget deletes device's cache entry entirely — called when Registry's
+// Reconcile reports device as Evicted (untethered longer than
+// UntetheredMaxAge), so a later device reconnecting under that identity
+// starts with an empty cache rather than replaying stale colors.
+func (c *Cache) Forget(device string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.byDevice, device)
+}
 ```
 
-Expected: all `PASS`.
+- [ ] **Step 3: Verify**
 
-- [ ] **Step 5: Commit**
+Run: `go test ./internal/dispatcher/...` — passes.
+
+- [ ] **Step 4: Commit**
 
 ```bash
-git add internal/ipc
-git commit -m "Add internal/ipc Request/Response types and NetConn adapter"
+git add internal/dispatcher
+git commit -m "Add internal/dispatcher types, device registry, and color cache"
 ```
 
 ---
 
-## Task 8: `internal/dispatcher` — single-writer dispatcher with backpressure
+## Task 7: `internal/dispatcher` — single-writer dispatcher core
 
 **Files:**
 - Create: `internal/dispatcher/dispatcher.go`
-- Test: `internal/dispatcher/dispatcher_test.go`
+- Create: `internal/dispatcher/dispatcher_test.go`
+
+This is the "traffic cop" itself: one goroutine (`Run`) that owns every
+`hid.Controller` in the `Registry` exclusively, per the design spec's
+concurrency section. `SetKey`/`ListDevices`/`GetCapabilities` submit a `job`
+and block for its `jobResult`. `Run`'s batching call, `groupForSend`, is
+Task 8's job — this task's `dispatchGroup`/`Run` already call it, so
+**Task 7 and Task 8 must be committed together**; `go build` fails between
+them (same pattern as Tasks 10/11 later in this plan). Note there's no
+separate per-request deadline here: `internal/hid`'s own per-report timeout
+(`protocol.go`'s `reportTimeout`) already bounds each individual write/read,
+so a wedged/unplugged device can't hang `Run` — nothing else needs to. These
+tests use Task 6's `registryWithConnected`/`registryWithConnectedMulti` test
+helpers (same package) to seed a `Registry` with a known device name directly,
+rather than going through `Reconcile`'s identity-based naming, since naming
+itself is out of scope here.
 
 - [ ] **Step 1: Write the failing tests**
 
 `internal/dispatcher/dispatcher_test.go`:
-
 ```go
 package dispatcher
 
 import (
 	"context"
 	"errors"
-	"fmt"
-	"sync"
 	"testing"
-	"time"
-
-	"github.com/seefood/vialrgb-notify/internal/ipc"
 )
 
-type fakeConn struct {
-	mu       sync.Mutex
-	written  []ipc.Request
-	response ipc.Response
-}
+func TestDispatcherSetKeyQueueFull(t *testing.T) {
+	reg := registryWithConnected("a", &fakeController{})
+	d := New(reg, NewCache(), 0) // zero-depth queue: never has room, and Run is never even started
 
-func (f *fakeConn) WriteFrame(v any) error {
-	req, ok := v.(ipc.Request)
-	if !ok {
-		return fmt.Errorf("fakeConn: WriteFrame got %T, want ipc.Request", v)
-	}
-	f.mu.Lock()
-	f.written = append(f.written, req)
-	f.mu.Unlock()
-	return nil
-}
-
-func (f *fakeConn) ReadFrame(v any) error {
-	resp, ok := v.(*ipc.Response)
-	if !ok {
-		return fmt.Errorf("fakeConn: ReadFrame got %T, want *ipc.Response", v)
-	}
-	*resp = f.response
-	return nil
-}
-
-func (f *fakeConn) SetDeadline(time.Time) error { return nil }
-
-func TestDoQueueFull(t *testing.T) {
-	d := New(&fakeConn{}, 1, time.Second)
-	d.queue <- pending{req: ipc.Request{}, reply: make(chan ipc.Response, 1)}
-
-	_, err := d.Do(context.Background(), ipc.Request{Op: ipc.OpListDevices})
+	err := d.SetKey(context.Background(), "a", 0, 0, 255, 255)
 	if !errors.Is(err, ErrQueueFull) {
-		t.Fatalf("Do() error = %v, want ErrQueueFull", err)
+		t.Fatalf("SetKey error = %v, want ErrQueueFull", err)
 	}
 }
 
-func TestRunSingleRequest(t *testing.T) {
-	conn := &fakeConn{response: ipc.Response{OK: true}}
-	d := New(conn, 8, time.Second)
+func TestDispatcherSetKeyUnknownDevice(t *testing.T) {
+	reg := NewRegistry()
+	d := New(reg, NewCache(), 8)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go d.Run(ctx)
 
-	resp, err := d.Do(context.Background(), ipc.Request{Op: ipc.OpListDevices})
-	if err != nil {
-		t.Fatalf("Do: %v", err)
+	err := d.SetKey(context.Background(), "missing", 0, 0, 255, 255)
+	if !errors.Is(err, ErrDeviceNotFound) {
+		t.Fatalf("SetKey error = %v, want ErrDeviceNotFound", err)
 	}
-	if !resp.OK {
-		t.Error("resp.OK = false, want true")
+}
+
+func TestDispatcherSetKeyUpdatesCache(t *testing.T) {
+	fc := &fakeController{}
+	reg := registryWithConnected("a", fc)
+	cache := NewCache()
+	d := New(reg, cache, 8)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go d.Run(ctx)
+
+	if err := d.SetKey(context.Background(), "a", 3, 1, 2, 3); err != nil {
+		t.Fatalf("SetKey: %v", err)
+	}
+	if len(fc.lastSet) != 1 || fc.lastSet[0].Index != 3 {
+		t.Errorf("controller.SetKeys called with %+v", fc.lastSet)
+	}
+	if snap := cache.Snapshot("a"); len(snap) != 1 || snap[0].Index != 3 {
+		t.Errorf("cache.Snapshot = %+v", snap)
+	}
+}
+
+func TestDispatcherListDevices(t *testing.T) {
+	reg := registryWithConnected("a", &fakeController{})
+	d := New(reg, NewCache(), 8)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go d.Run(ctx)
+
+	devices, err := d.ListDevices(context.Background())
+	if err != nil {
+		t.Fatalf("ListDevices: %v", err)
+	}
+	if len(devices) != 1 || devices[0].Name != "a" || !devices[0].Connected {
+		t.Errorf("ListDevices = %+v", devices)
+	}
+}
+
+func TestDispatcherGetCapabilities(t *testing.T) {
+	reg := registryWithConnected("a", &fakeController{
+		numLEDs: 2, positions: map[uint16][2]uint8{0: {1, 1}, 1: {2, 2}},
+	})
+	d := New(reg, NewCache(), 8)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go d.Run(ctx)
+
+	caps, err := d.GetCapabilities(context.Background(), "a")
+	if err != nil {
+		t.Fatalf("GetCapabilities: %v", err)
+	}
+	if caps.LEDCount != 2 || len(caps.Positions) != 2 {
+		t.Errorf("caps = %+v", caps)
 	}
 }
 ```
 
-- [ ] **Step 2: Run tests, verify they fail**
+Run: `go test ./internal/dispatcher/...` — fails to compile (`groupForSend`
+undefined; land alongside Task 8).
 
-```bash
-go test ./internal/dispatcher/...
-```
-
-Expected: `FAIL` — package doesn't exist yet.
-
-- [ ] **Step 3: Implement**
+- [ ] **Step 2: Implement**
 
 `internal/dispatcher/dispatcher.go`:
-
 ```go
-// Package dispatcher is restd's single-writer "traffic cop" for the
-// connectord link: every other goroutine (HTTP handlers now; per-key
-// animation timers in later phases) submits a request through Do and never
-// touches the connection directly.
 package dispatcher
 
 import (
 	"context"
-	"errors"
-	"time"
 
-	"github.com/seefood/vialrgb-notify/internal/ipc"
+	"github.com/seefood/vialrgb-notify/internal/hid"
 )
 
-// ErrQueueFull is returned by Do when the dispatcher's request queue is at
-// capacity — callers (internal/api's HTTP handlers) map this to a 503.
-var ErrQueueFull = errors.New("dispatcher: request queue full")
+type opKind int
 
-// Conn is the connectord link this Dispatcher owns exclusively.
-type Conn interface {
-	ipc.Conn
-	SetDeadline(t time.Time) error
+const (
+	opSetKey opKind = iota
+	opListDevices
+	opGetCapabilities
+)
+
+type job struct {
+	kind   opKind
+	device string
+	key    hid.KeyColor // valid when kind == opSetKey
+	reply  chan jobResult
 }
 
-type pending struct {
-	req   ipc.Request
-	reply chan ipc.Response
+type jobResult struct {
+	err  error
+	list []DeviceSummary
+	caps Capabilities
 }
 
-// Dispatcher serializes all access to a Conn, per the design spec's
-// concurrency section: "single dispatcher goroutine owns the socketpair
-// connection exclusively."
+// Dispatcher serializes all access to registry's open hid.Controllers.
 type Dispatcher struct {
-	conn        Conn
-	queue       chan pending
-	linkTimeout time.Duration
+	registry *Registry
+	cache    *Cache
+	queue    chan job
 }
 
 // New creates a Dispatcher. queueDepth bounds in-flight requests (spec:
-// e.g. 64); linkTimeout bounds each read/write on conn (spec: e.g. 1s), so a
-// wedged connectord can't hang the dispatcher forever.
-func New(conn Conn, queueDepth int, linkTimeout time.Duration) *Dispatcher {
-	return &Dispatcher{
-		conn:        conn,
-		queue:       make(chan pending, queueDepth),
-		linkTimeout: linkTimeout,
-	}
+// e.g. 64) — a full queue fails fast with ErrQueueFull rather than growing
+// goroutines/memory without bound.
+func New(registry *Registry, cache *Cache, queueDepth int) *Dispatcher {
+	return &Dispatcher{registry: registry, cache: cache, queue: make(chan job, queueDepth)}
 }
 
-// Do submits req and blocks for its reply, or returns ctx.Err() or
-// ErrQueueFull immediately if the queue is full.
-func (d *Dispatcher) Do(ctx context.Context, req ipc.Request) (ipc.Response, error) {
-	reply := make(chan ipc.Response, 1)
+func (d *Dispatcher) submit(ctx context.Context, j job) (jobResult, error) {
 	select {
-	case d.queue <- pending{req: req, reply: reply}:
+	case d.queue <- j:
 	default:
-		return ipc.Response{}, ErrQueueFull
+		return jobResult{}, ErrQueueFull
 	}
 	select {
-	case resp := <-reply:
-		return resp, nil
+	case res := <-j.reply:
+		return res, nil
 	case <-ctx.Done():
-		return ipc.Response{}, ctx.Err()
+		return jobResult{}, ctx.Err()
 	}
 }
 
-// Run is the single dispatcher goroutine: it owns conn exclusively. On each
-// cycle it takes one request, then non-blockingly drains any others already
-// queued and batches same-device contiguous SetKeys before sending (see
-// batch.go). It runs until ctx is canceled.
+// SetKey submits one LED color change and blocks for its result.
+func (d *Dispatcher) SetKey(ctx context.Context, device string, index uint16, h, s, v uint8) error {
+	res, err := d.submit(ctx, job{
+		kind:  opSetKey,
+		device: device,
+		key:   hid.KeyColor{Index: index, H: h, S: s, V: v},
+		reply: make(chan jobResult, 1),
+	})
+	if err != nil {
+		return err
+	}
+	return res.err
+}
+
+// ListDevices returns every currently registered device and whether it's
+// presently connected.
+func (d *Dispatcher) ListDevices(ctx context.Context) ([]DeviceSummary, error) {
+	res, err := d.submit(ctx, job{kind: opListDevices, reply: make(chan jobResult, 1)})
+	if err != nil {
+		return nil, err
+	}
+	return res.list, res.err
+}
+
+// GetCapabilities returns device's LED count and matrix positions.
+func (d *Dispatcher) GetCapabilities(ctx context.Context, device string) (Capabilities, error) {
+	res, err := d.submit(ctx, job{kind: opGetCapabilities, device: device, reply: make(chan jobResult, 1)})
+	if err != nil {
+		return Capabilities{}, err
+	}
+	return res.caps, res.err
+}
+
+// Run is the single dispatcher goroutine: it owns every hid.Controller in
+// registry exclusively. On each cycle it takes one job, then
+// non-blockingly drains any others already queued and batches same-device
+// contiguous SetKey jobs (see batch.go) before issuing them. It runs until
+// ctx is canceled.
 func (d *Dispatcher) Run(ctx context.Context) {
 	for {
-		var first pending
+		var first job
 		select {
 		case first = <-d.queue:
 		case <-ctx.Done():
 			return
 		}
-		batch := []pending{first}
+		batch := []job{first}
 	drain:
 		for {
 			select {
-			case p := <-d.queue:
-				batch = append(batch, p)
+			case j := <-d.queue:
+				batch = append(batch, j)
 			default:
 				break drain
 			}
 		}
-		d.dispatchBatch(batch)
+		for _, group := range groupForSend(batch) {
+			d.dispatchGroup(group)
+		}
 	}
 }
 
-func (d *Dispatcher) dispatchBatch(batch []pending) {
-	for _, group := range groupForSend(batch) {
-		if err := d.conn.SetDeadline(time.Now().Add(d.linkTimeout)); err != nil {
-			failAll(group, err)
-			continue
-		}
-		req, err := mergeRequest(group)
+func (d *Dispatcher) dispatchGroup(group []job) {
+	switch group[0].kind {
+	case opSetKey:
+		d.dispatchSetKeys(group)
+	case opListDevices:
+		group[0].reply <- jobResult{list: d.registry.Summaries()}
+	case opGetCapabilities:
+		caps, err := d.getCapabilities(group[0].device)
+		group[0].reply <- jobResult{caps: caps, err: err}
+	}
+}
+
+func (d *Dispatcher) dispatchSetKeys(group []job) {
+	device := group[0].device
+	ctrl, ok := d.registry.Get(device)
+	if !ok {
+		failAll(group, ErrDeviceNotFound)
+		return
+	}
+	keys := make([]hid.KeyColor, len(group))
+	for i, j := range group {
+		keys[i] = j.key
+	}
+	err := ctrl.SetKeys(keys)
+	if err == nil {
+		d.cache.Update(device, keys)
+	}
+	for _, j := range group {
+		j.reply <- jobResult{err: err}
+	}
+}
+
+func (d *Dispatcher) getCapabilities(device string) (Capabilities, error) {
+	ctrl, ok := d.registry.Get(device)
+	if !ok {
+		return Capabilities{}, ErrDeviceNotFound
+	}
+	n, err := ctrl.GetNumberLEDs()
+	if err != nil {
+		return Capabilities{}, err
+	}
+	caps := Capabilities{LEDCount: int(n)}
+	for i := uint16(0); i < n; i++ {
+		row, col, err := ctrl.GetLEDInfo(i)
 		if err != nil {
-			failAll(group, err)
-			continue
+			return Capabilities{}, err
 		}
-		if err := d.conn.WriteFrame(req); err != nil {
-			failAll(group, err)
-			continue
-		}
-		var resp ipc.Response
-		if err := d.conn.ReadFrame(&resp); err != nil {
-			failAll(group, err)
-			continue
-		}
-		for _, p := range group {
-			p.reply <- resp
-		}
+		caps.Positions = append(caps.Positions, LEDPosition{Index: i, Row: row, Col: col})
 	}
+	return caps, nil
 }
 
-func failAll(group []pending, err error) {
-	resp := ipc.Response{OK: false, Code: ipc.ErrUnavailable, Error: err.Error()}
-	for _, p := range group {
-		p.reply <- resp
+func failAll(group []job, err error) {
+	for _, j := range group {
+		j.reply <- jobResult{err: err}
 	}
 }
 ```
 
-- [ ] **Step 4: Run tests, verify they pass**
+- [ ] **Step 3: Verify** — after landing Task 8's `groupForSend` in the same
+commit, `go test ./internal/dispatcher/...` passes.
 
-```bash
-go test ./internal/dispatcher/... -v
-```
-
-Expected: both `PASS`.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add internal/dispatcher
-git commit -m "Add internal/dispatcher: single-writer Do/Run with backpressure"
-```
+- [ ] **Step 4: Commit** — see Task 8 (combined commit).
 
 ---
 
-## Task 9: `internal/dispatcher` — contiguous-index batching
+## Task 8: `internal/dispatcher` — contiguous-index batching
 
 **Files:**
 - Create: `internal/dispatcher/batch.go`
-- Test: `internal/dispatcher/batch_test.go`
+- Create: `internal/dispatcher/batch_test.go`
+
+`groupForSend` partitions a drained batch of jobs into groups that become one
+`hid.Controller.SetKeys` call each, per the design spec: same device,
+contiguous LED index, up to VialRGB's own 9-LED-per-packet ceiling
+(`internal/hid`'s `maxKeysPerReport`). Non-`SetKey` jobs (`ListDevices`,
+`GetCapabilities`) never merge with anything. Land this together with Task 7
+— `go build ./...` doesn't pass until both are present.
 
 - [ ] **Step 1: Write the failing tests**
 
 `internal/dispatcher/batch_test.go`:
-
 ```go
 package dispatcher
 
 import (
-	"encoding/json"
 	"testing"
 
-	"github.com/seefood/vialrgb-notify/internal/ipc"
+	"github.com/seefood/vialrgb-notify/internal/hid"
 )
 
-func mustSetKeyPending(t *testing.T, device string, index uint16) pending {
-	t.Helper()
-	args, err := json.Marshal(ipc.SetKeyArgs{Device: device, Index: index})
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-	return pending{req: ipc.Request{Op: ipc.OpSetKey, Args: args}, reply: make(chan ipc.Response, 1)}
+func setKeyJob(device string, index uint16) job {
+	return job{kind: opSetKey, device: device, key: hid.KeyColor{Index: index}, reply: make(chan jobResult, 1)}
 }
 
 func TestGroupForSendBatchesContiguous(t *testing.T) {
-	batch := []pending{
-		mustSetKeyPending(t, "a", 0),
-		mustSetKeyPending(t, "a", 1),
-		mustSetKeyPending(t, "a", 2), // contiguous, same device -> one group
-		mustSetKeyPending(t, "b", 5), // different device -> its own group
-		mustSetKeyPending(t, "a", 10), // non-contiguous -> its own group
+	batch := []job{
+		setKeyJob("a", 0),
+		setKeyJob("a", 1),
+		setKeyJob("a", 2),  // contiguous, same device -> one group
+		setKeyJob("b", 5),  // different device -> its own group
+		setKeyJob("a", 10), // non-contiguous -> its own group
 	}
 	groups := groupForSend(batch)
 	if len(groups) != 3 {
@@ -1627,9 +1912,9 @@ func TestGroupForSendBatchesContiguous(t *testing.T) {
 }
 
 func TestGroupForSendCapsAtNine(t *testing.T) {
-	batch := make([]pending, 12)
+	batch := make([]job, 12)
 	for i := range batch {
-		batch[i] = mustSetKeyPending(t, "a", uint16(i))
+		batch[i] = setKeyJob("a", uint16(i))
 	}
 	groups := groupForSend(batch)
 	if len(groups) != 2 || len(groups[0]) != 9 || len(groups[1]) != 3 {
@@ -1638,9 +1923,9 @@ func TestGroupForSendCapsAtNine(t *testing.T) {
 }
 
 func TestGroupForSendNonSetKeyAlwaysSingleton(t *testing.T) {
-	batch := []pending{
-		{req: ipc.Request{Op: ipc.OpListDevices}, reply: make(chan ipc.Response, 1)},
-		{req: ipc.Request{Op: ipc.OpListDevices}, reply: make(chan ipc.Response, 1)},
+	batch := []job{
+		{kind: opListDevices, reply: make(chan jobResult, 1)},
+		{kind: opListDevices, reply: make(chan jobResult, 1)},
 	}
 	groups := groupForSend(batch)
 	if len(groups) != 2 {
@@ -1648,80 +1933,34 @@ func TestGroupForSendNonSetKeyAlwaysSingleton(t *testing.T) {
 	}
 }
 
-func groupSizes(groups [][]pending) []int {
+func groupSizes(groups [][]job) []int {
 	sizes := make([]int, len(groups))
 	for i, g := range groups {
 		sizes[i] = len(g)
 	}
 	return sizes
 }
-
-func TestMergeRequestSingleton(t *testing.T) {
-	p := mustSetKeyPending(t, "a", 3)
-	req, err := mergeRequest([]pending{p})
-	if err != nil {
-		t.Fatalf("mergeRequest: %v", err)
-	}
-	if req.Op != ipc.OpSetKey {
-		t.Errorf("Op = %q, want %q (singleton groups forward unchanged)", req.Op, ipc.OpSetKey)
-	}
-}
-
-func TestMergeRequestBatch(t *testing.T) {
-	group := []pending{
-		mustSetKeyPending(t, "a", 0),
-		mustSetKeyPending(t, "a", 1),
-	}
-	req, err := mergeRequest(group)
-	if err != nil {
-		t.Fatalf("mergeRequest: %v", err)
-	}
-	if req.Op != ipc.OpSetKeys {
-		t.Fatalf("Op = %q, want %q", req.Op, ipc.OpSetKeys)
-	}
-	var args ipc.SetKeysArgs
-	if err := json.Unmarshal(req.Args, &args); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if args.Device != "a" || len(args.Keys) != 2 {
-		t.Errorf("args = %+v", args)
-	}
-}
 ```
 
-- [ ] **Step 2: Run tests, verify they fail**
+Run: `go test ./internal/dispatcher/...` — fails, `groupForSend` undefined.
 
-```bash
-go test ./internal/dispatcher/... -run "GroupForSend|MergeRequest"
-```
-
-Expected: `FAIL` — `groupForSend`, `mergeRequest` undefined.
-
-- [ ] **Step 3: Implement**
+- [ ] **Step 2: Implement**
 
 `internal/dispatcher/batch.go`:
-
 ```go
 package dispatcher
-
-import (
-	"encoding/json"
-	"fmt"
-
-	"github.com/seefood/vialrgb-notify/internal/ipc"
-)
 
 // maxBatch is VialRGB's own per-packet ceiling (see internal/hid's
 // maxKeysPerReport) — batches larger than this become multiple groups.
 const maxBatch = 9
 
-// groupForSend partitions a drained batch of pending requests into groups
-// that become one wire request each: non-SetKey ops are always singleton
-// groups; SetKey ops are grouped per the design spec — same device,
-// contiguous Index, up to maxBatch — preserving arrival order.
-func groupForSend(batch []pending) [][]pending {
-	var out [][]pending
-	var run []pending
+// groupForSend partitions a drained batch of jobs into groups that become
+// one hid.Controller.SetKeys call each: non-SetKey jobs are always
+// singleton groups; SetKey jobs are grouped per the design spec — same
+// device, contiguous LED index, up to maxBatch — preserving arrival order.
+func groupForSend(batch []job) [][]job {
+	var out [][]job
+	var run []job
 	var runDevice string
 	var runNextIndex uint16
 
@@ -1732,115 +1971,331 @@ func groupForSend(batch []pending) [][]pending {
 		}
 	}
 
-	for _, p := range batch {
-		device, index, isSetKey := setKeyKey(p.req)
-		if !isSetKey {
+	for _, j := range batch {
+		if j.kind != opSetKey {
 			flush()
-			out = append(out, []pending{p})
+			out = append(out, []job{j})
 			continue
 		}
-		if len(run) > 0 && device == runDevice && index == runNextIndex && len(run) < maxBatch {
-			run = append(run, p)
+		if len(run) > 0 && j.device == runDevice && j.key.Index == runNextIndex && len(run) < maxBatch {
+			run = append(run, j)
 			runNextIndex++
 			continue
 		}
 		flush()
-		run = []pending{p}
-		runDevice = device
-		runNextIndex = index + 1
+		run = []job{j}
+		runDevice = j.device
+		runNextIndex = j.key.Index + 1
 	}
 	flush()
 	return out
 }
-
-// setKeyKey reports whether req is a SetKey request, and if so its device
-// and LED index.
-func setKeyKey(req ipc.Request) (device string, index uint16, ok bool) {
-	if req.Op != ipc.OpSetKey {
-		return "", 0, false
-	}
-	var args ipc.SetKeyArgs
-	if err := json.Unmarshal(req.Args, &args); err != nil {
-		return "", 0, false
-	}
-	return args.Device, args.Index, true
-}
-
-// mergeRequest converts one group into the wire request to send: a
-// singleton group forwards its original request unchanged; a larger
-// SetKey group coalesces into one SetKeys.
-func mergeRequest(group []pending) (ipc.Request, error) {
-	if len(group) == 1 {
-		return group[0].req, nil
-	}
-	var device string
-	keys := make([]ipc.KeyColor, 0, len(group))
-	for i, p := range group {
-		var args ipc.SetKeyArgs
-		if err := json.Unmarshal(p.req.Args, &args); err != nil {
-			return ipc.Request{}, fmt.Errorf("dispatcher: unmarshal batched SetKeyArgs: %w", err)
-		}
-		if i == 0 {
-			device = args.Device
-		}
-		keys = append(keys, ipc.KeyColor{Index: args.Index, H: args.H, S: args.S, V: args.V})
-	}
-	argsJSON, err := json.Marshal(ipc.SetKeysArgs{Device: device, Keys: keys})
-	if err != nil {
-		return ipc.Request{}, fmt.Errorf("dispatcher: marshal SetKeysArgs: %w", err)
-	}
-	return ipc.Request{Op: ipc.OpSetKeys, Args: argsJSON}, nil
-}
 ```
 
-- [ ] **Step 4: Run tests, verify they pass**
+- [ ] **Step 3: Verify**
 
-```bash
-go test ./internal/dispatcher/... -v
-```
+Run: `go test ./internal/dispatcher/...` — all of Task 6/7/8's tests pass.
 
-Expected: all `PASS`.
-
-- [ ] **Step 5: Commit**
+- [ ] **Step 4: Commit**
 
 ```bash
 git add internal/dispatcher
-git commit -m "Add internal/dispatcher batching: coalesce contiguous SetKey into SetKeys"
+git commit -m "Add internal/dispatcher single-writer core and contiguous-index batching"
 ```
 
 ---
 
-## Task 10: `internal/api` — `PUT /devices/{name}/keys/{row},{col}`
+## Task 9: `internal/dispatcher` — state persistence: reconnect and periodic redraw
+
+**Files:**
+- Create: `internal/dispatcher/redraw.go`
+- Create: `internal/dispatcher/redraw_test.go`
+
+This is the design spec's "State persistence & refresh" behavior:
+`Dispatcher.Redraw` replays a device's cached colors through the normal
+`SetKey` path (so it's serialized/batched exactly like any other write, and
+updates the same cache it read from — a harmless no-op re-write).
+`RunPeriodicRedraw` does this unconditionally for every currently *Connected*
+device every `interval` (Registry's `Summaries` now also lists `Untethered`
+devices per Task 6, which this deliberately skips — there's no controller to
+write to until a rewire reconnects one), regardless of reconnect state — the
+safety net for a firmware-side soft reset that never drops the USB
+connection, so no reconnect is ever detected for it. `RedrawReconnected` does
+it immediately for devices `Registry.Reconcile` just reported as
+`Reconnected` (a rewire), so a replug doesn't have to wait for the next
+periodic tick. Task 14's `main()` wires both: `RedrawReconnected` off the
+existing hotplug-poll loop that already calls `Reconcile`, `RunPeriodicRedraw`
+off its own independent ticker — two genuinely independent triggers, per the
+design spec, not one mechanism wearing two names. This task also adds a test
+proving the untethered-rewire-regains-cache behavior end to end within this
+package (Registry + Cache + Dispatcher composed, no `cmd/vialrgbd` needed).
+
+- [ ] **Step 1: Write the failing tests**
+
+`internal/dispatcher/redraw_test.go`:
+```go
+package dispatcher
+
+import (
+	"context"
+	"io"
+	"log/slog"
+	"testing"
+	"time"
+
+	"github.com/seefood/vialrgb-notify/internal/hid"
+)
+
+func discardLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
+
+func TestRedrawEmptyCacheIsNoop(t *testing.T) {
+	fc := &fakeController{}
+	reg := registryWithConnected("a", fc)
+	d := New(reg, NewCache(), 8)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go d.Run(ctx)
+
+	if err := d.Redraw(context.Background(), "a"); err != nil {
+		t.Fatalf("Redraw: %v", err)
+	}
+	if fc.lastSet != nil {
+		t.Errorf("SetKeys called on empty cache: %+v", fc.lastSet)
+	}
+}
+
+func TestRedrawReplaysCache(t *testing.T) {
+	fc := &fakeController{}
+	reg := registryWithConnected("a", fc)
+	cache := NewCache()
+	cache.Update("a", []hid.KeyColor{{Index: 0, H: 1, S: 2, V: 3}})
+	d := New(reg, cache, 8)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go d.Run(ctx)
+
+	if err := d.Redraw(context.Background(), "a"); err != nil {
+		t.Fatalf("Redraw: %v", err)
+	}
+	if len(fc.lastSet) != 1 || fc.lastSet[0].H != 1 {
+		t.Errorf("SetKeys called with %+v", fc.lastSet)
+	}
+}
+
+func TestRedrawReconnectedOnlyTouchesGivenDevices(t *testing.T) {
+	fcA, fcB := &fakeController{}, &fakeController{}
+	reg := registryWithConnectedMulti(map[string]hid.Controller{"a": fcA, "b": fcB})
+	cache := NewCache()
+	cache.Update("a", []hid.KeyColor{{Index: 0}})
+	cache.Update("b", []hid.KeyColor{{Index: 0}})
+	d := New(reg, cache, 8)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go d.Run(ctx)
+
+	d.RedrawReconnected(context.Background(), []string{"a"}, discardLogger())
+
+	if fcA.lastSet == nil {
+		t.Error("device a (reconnected) was not redrawn")
+	}
+	if fcB.lastSet != nil {
+		t.Error("device b (not in reconnected list) should not have been redrawn")
+	}
+}
+
+func TestRunPeriodicRedrawFiresOnTick(t *testing.T) {
+	fc := &fakeController{}
+	reg := registryWithConnected("a", fc)
+	cache := NewCache()
+	cache.Update("a", []hid.KeyColor{{Index: 0}})
+	d := New(reg, cache, 8)
+	dispatchCtx, cancelDispatch := context.WithCancel(context.Background())
+	defer cancelDispatch()
+	go d.Run(dispatchCtx)
+
+	redrawCtx, cancelRedraw := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancelRedraw()
+	d.RunPeriodicRedraw(redrawCtx, 10*time.Millisecond, discardLogger())
+
+	if fc.lastSet == nil {
+		t.Error("periodic redraw never fired within the test window")
+	}
+}
+
+func TestReconnectRewireRegainsCache(t *testing.T) {
+	reg := NewRegistry()
+	cache := NewCache()
+	d := New(reg, cache, 8)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go d.Run(ctx)
+
+	id := hid.Identity{HasUID: true, UID: [8]byte{7}}
+	res := reg.Reconcile([]PresentDevice{{Identity: id, Ctrl: &fakeController{}}}, time.Now(), UntetheredMaxAge)
+	var name string
+	for n := range res.Devices {
+		name = n
+	}
+
+	if err := d.SetKey(context.Background(), name, 0, 1, 2, 3); err != nil {
+		t.Fatalf("SetKey: %v", err)
+	}
+
+	reg.Reconcile(nil, time.Now(), UntetheredMaxAge) // disconnect: slot goes untethered, cache retained
+
+	// Replug: same identity, a fresh hid.Controller instance, as a real
+	// replug would produce.
+	fc2 := &fakeController{}
+	res = reg.Reconcile([]PresentDevice{{Identity: id, Ctrl: fc2}}, time.Now(), UntetheredMaxAge)
+	if len(res.Reconnected) != 1 || res.Reconnected[0] != name {
+		t.Fatalf("Reconnected = %v, want [%s] (rewire)", res.Reconnected, name)
+	}
+
+	d.RedrawReconnected(context.Background(), res.Reconnected, discardLogger())
+
+	if len(fc2.lastSet) != 1 || fc2.lastSet[0].H != 1 {
+		t.Errorf("new controller's SetKeys = %+v, want the pre-disconnect color replayed via rewire", fc2.lastSet)
+	}
+}
+```
+
+Run: `go test ./internal/dispatcher/...` — fails, `Redraw`/`RedrawReconnected`/`RunPeriodicRedraw` undefined.
+
+- [ ] **Step 2: Implement**
+
+`internal/dispatcher/redraw.go`:
+```go
+package dispatcher
+
+import (
+	"context"
+	"log/slog"
+	"time"
+)
+
+// RedrawInterval is the unconditional periodic redraw cadence from the
+// design spec's "State persistence & refresh": every registered device's
+// full cached color set is replayed every 5 seconds, always, regardless of
+// reconnect detection.
+const RedrawInterval = 5 * time.Second
+
+// Redraw replays device's full cached color set through the normal SetKey
+// dispatch path (so it's serialized/batched exactly like any other write).
+// A device with an empty cache (never had a color set) is a no-op.
+func (d *Dispatcher) Redraw(ctx context.Context, device string) error {
+	for _, k := range d.cache.Snapshot(device) {
+		if err := d.SetKey(ctx, device, k.Index, k.H, k.S, k.V); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// RunPeriodicRedraw redraws every currently Connected device's cache every
+// interval, independent of any reconnect detection, until ctx is canceled.
+// Untethered devices (Registry.Summaries now reports those too, per Task 6)
+// are skipped — there's no live controller to write to until a rewire
+// reconnects one.
+func (d *Dispatcher) RunPeriodicRedraw(ctx context.Context, interval time.Duration, logger *slog.Logger) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			for _, dev := range d.registry.Summaries() {
+				if !dev.Connected {
+					continue
+				}
+				if err := d.Redraw(ctx, dev.Name); err != nil {
+					logger.Warn("periodic redraw failed", "device", dev.Name, "err", err)
+				}
+			}
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+// RedrawReconnected redraws every name in reconnected — the set returned by
+// Registry.Reconcile when an Untethered slot rewires back to Connected — so
+// a replug doesn't have to wait for RunPeriodicRedraw's next tick.
+func (d *Dispatcher) RedrawReconnected(ctx context.Context, reconnected []string, logger *slog.Logger) {
+	for _, name := range reconnected {
+		if err := d.Redraw(ctx, name); err != nil {
+			logger.Warn("reconnect redraw failed", "device", name, "err", err)
+		}
+	}
+}
+```
+
+- [ ] **Step 3: Verify**
+
+Run: `go test ./internal/dispatcher/...` — passes.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add internal/dispatcher
+git commit -m "Add internal/dispatcher reconnect and periodic state-persistence redraw"
+```
+
+---
+
+## Task 10: `internal/api` — `PUT /devices/{name}/keys/{row,col}` handler
 
 **Files:**
 - Create: `internal/api/handlers.go`
-- Test: `internal/api/handlers_test.go`
+- Create: `internal/api/handlers_test.go`
+
+`internal/api` implements vialrgbd's HTTP surface. `Handler` depends on a
+`Dispatcher` interface (the subset of `*dispatcher.Dispatcher`'s methods it
+needs) so tests can substitute a fake without a real dispatcher goroutine,
+and a `CapabilitiesSource` interface (Task 11 supplies the real
+`CapabilitiesCache` implementation) so tests can substitute a fake there too
+— that means **this task and Task 11 must land together**; `go build`
+doesn't pass with only `fakeCaps` referenced and no `CapabilitiesCache`
+defined, but the reverse split (defining `CapabilitiesCache` with no
+handlers using it) would be equally incomplete, so committing them as one
+unit is simplest.
 
 - [ ] **Step 1: Write the failing tests**
 
 `internal/api/handlers_test.go`:
-
 ```go
 package api
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
-	"github.com/seefood/vialrgb-notify/internal/ipc"
+	"github.com/seefood/vialrgb-notify/internal/dispatcher"
 )
 
-type fakeClient struct {
-	do func(ctx context.Context, req ipc.Request) (ipc.Response, error)
+// fakeDispatcher and fakeCaps are reused by every test file in this package.
+type fakeDispatcher struct {
+	setKey     func(ctx context.Context, device string, index uint16, h, s, v uint8) error
+	listResult []dispatcher.DeviceSummary
+	listErr    error
+	caps       dispatcher.Capabilities
+	capsErr    error
+	capsCalls  int
 }
 
-func (f *fakeClient) Do(ctx context.Context, req ipc.Request) (ipc.Response, error) {
-	return f.do(ctx, req)
+func (f *fakeDispatcher) SetKey(ctx context.Context, device string, index uint16, h, s, v uint8) error {
+	return f.setKey(ctx, device, index, h, s, v)
+}
+
+func (f *fakeDispatcher) ListDevices(context.Context) ([]dispatcher.DeviceSummary, error) {
+	return f.listResult, f.listErr
+}
+
+func (f *fakeDispatcher) GetCapabilities(context.Context, string) (dispatcher.Capabilities, error) {
+	f.capsCalls++
+	return f.caps, f.capsErr
 }
 
 type fakeCaps struct {
@@ -1854,12 +2309,14 @@ func (f *fakeCaps) IndexFor(context.Context, string, uint8, uint8) (uint16, bool
 }
 
 func TestSetKeySuccess(t *testing.T) {
-	var gotReq ipc.Request
-	client := &fakeClient{do: func(_ context.Context, req ipc.Request) (ipc.Response, error) {
-		gotReq = req
-		return ipc.Response{OK: true}, nil
+	var gotDevice string
+	var gotIndex uint16
+	var gotH, gotS, gotV uint8
+	disp := &fakeDispatcher{setKey: func(_ context.Context, device string, index uint16, h, s, v uint8) error {
+		gotDevice, gotIndex, gotH, gotS, gotV = device, index, h, s, v
+		return nil
 	}}
-	h := NewHandler(client, &fakeCaps{index: 5, found: true})
+	h := NewHandler(disp, &fakeCaps{index: 5, found: true})
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPut, "/devices/cxt12e4-0/keys/2,2", strings.NewReader(`{"color":"#ff0000"}`))
@@ -1868,21 +2325,17 @@ func TestSetKeySuccess(t *testing.T) {
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusNoContent, rec.Body.String())
 	}
-	var args ipc.SetKeyArgs
-	if err := json.Unmarshal(gotReq.Args, &args); err != nil {
-		t.Fatalf("unmarshal args: %v", err)
-	}
-	if args.Device != "cxt12e4-0" || args.Index != 5 || args.H != 0 || args.S != 255 || args.V != 255 {
-		t.Errorf("args = %+v", args)
+	if gotDevice != "cxt12e4-0" || gotIndex != 5 || gotH != 0 || gotS != 255 || gotV != 255 {
+		t.Errorf("SetKey called with device=%q index=%d h=%d s=%d v=%d", gotDevice, gotIndex, gotH, gotS, gotV)
 	}
 }
 
 func TestSetKeyBadColor(t *testing.T) {
-	client := &fakeClient{do: func(context.Context, ipc.Request) (ipc.Response, error) {
+	disp := &fakeDispatcher{setKey: func(context.Context, string, uint16, uint8, uint8, uint8) error {
 		t.Fatal("dispatcher should not be called for a malformed color")
-		return ipc.Response{}, nil
+		return nil
 	}}
-	h := NewHandler(client, &fakeCaps{index: 5, found: true})
+	h := NewHandler(disp, &fakeCaps{index: 5, found: true})
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPut, "/devices/cxt12e4-0/keys/2,2", strings.NewReader(`{"color":"not-a-color"}`))
@@ -1894,11 +2347,11 @@ func TestSetKeyBadColor(t *testing.T) {
 }
 
 func TestSetKeyUnknownKeyPosition(t *testing.T) {
-	client := &fakeClient{do: func(context.Context, ipc.Request) (ipc.Response, error) {
+	disp := &fakeDispatcher{setKey: func(context.Context, string, uint16, uint8, uint8, uint8) error {
 		t.Fatal("dispatcher should not be called when the key position isn't found")
-		return ipc.Response{}, nil
+		return nil
 	}}
-	h := NewHandler(client, &fakeCaps{found: false})
+	h := NewHandler(disp, &fakeCaps{found: false})
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPut, "/devices/cxt12e4-0/keys/99,99", strings.NewReader(`{"color":"#ff0000"}`))
@@ -1910,7 +2363,7 @@ func TestSetKeyUnknownKeyPosition(t *testing.T) {
 }
 
 func TestSetKeyUnknownDevice(t *testing.T) {
-	h := NewHandler(&fakeClient{}, &fakeCaps{err: errDeviceNotFound})
+	h := NewHandler(&fakeDispatcher{}, &fakeCaps{err: dispatcher.ErrDeviceNotFound})
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPut, "/devices/nope/keys/2,2", strings.NewReader(`{"color":"#ff0000"}`))
@@ -1922,10 +2375,10 @@ func TestSetKeyUnknownDevice(t *testing.T) {
 }
 
 func TestSetKeyDispatcherUnavailable(t *testing.T) {
-	client := &fakeClient{do: func(context.Context, ipc.Request) (ipc.Response, error) {
-		return ipc.Response{}, errors.New("boom")
+	disp := &fakeDispatcher{setKey: func(context.Context, string, uint16, uint8, uint8, uint8) error {
+		return errors.New("boom")
 	}}
-	h := NewHandler(client, &fakeCaps{index: 5, found: true})
+	h := NewHandler(disp, &fakeCaps{index: 5, found: true})
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPut, "/devices/cxt12e4-0/keys/2,2", strings.NewReader(`{"color":"#ff0000"}`))
@@ -1937,21 +2390,15 @@ func TestSetKeyDispatcherUnavailable(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run tests, verify they fail**
+Run: `go test ./internal/api/...` — fails, package doesn't exist yet.
 
-```bash
-go test ./internal/api/...
-```
-
-Expected: `FAIL` — package doesn't exist yet.
-
-- [ ] **Step 3: Implement**
+- [ ] **Step 2: Implement**
 
 `internal/api/handlers.go`:
-
 ```go
-// Package api implements restd's HTTP surface: the PUT/GET routes from the
-// design spec, the color parser's integration point, and bearer-token auth.
+// Package api implements vialrgbd's HTTP surface: the PUT/GET routes from
+// the design spec, backed directly by an in-process internal/dispatcher.Dispatcher
+// (no RPC layer — single binary, single process).
 package api
 
 import (
@@ -1964,35 +2411,37 @@ import (
 	"strings"
 
 	"github.com/seefood/vialrgb-notify/internal/color"
-	"github.com/seefood/vialrgb-notify/internal/ipc"
+	"github.com/seefood/vialrgb-notify/internal/dispatcher"
 )
 
-// DispatchClient is the subset of *dispatcher.Dispatcher the HTTP handlers
-// need, so tests can substitute a fake.
-type DispatchClient interface {
-	Do(ctx context.Context, req ipc.Request) (ipc.Response, error)
+// Dispatcher is the subset of *dispatcher.Dispatcher the HTTP handlers need,
+// so tests can substitute a fake without a real dispatcher goroutine.
+type Dispatcher interface {
+	SetKey(ctx context.Context, device string, index uint16, h, s, v uint8) error
+	ListDevices(ctx context.Context) ([]dispatcher.DeviceSummary, error)
+	GetCapabilities(ctx context.Context, device string) (dispatcher.Capabilities, error)
 }
 
 // CapabilitiesSource resolves row,col to a LED index for a named device.
-// Returns (0, false, errDeviceNotFound)-shaped errors for an unknown
-// device, (_, false, nil) for a known device with no key at that position,
-// and a non-nil err for a genuine connectord round-trip failure.
+// Returns (_, false, dispatcher.ErrDeviceNotFound) for an unknown device,
+// (_, false, nil) for a known device with no key at that position, and a
+// non-nil err for a genuine dispatch failure.
 type CapabilitiesSource interface {
 	IndexFor(ctx context.Context, device string, row, col uint8) (uint16, bool, error)
 }
 
-// Handler holds restd's dependencies and builds its route table.
+// Handler holds vialrgbd's HTTP dependencies and builds its route table.
 type Handler struct {
-	client DispatchClient
-	caps   CapabilitiesSource
+	disp Dispatcher
+	caps CapabilitiesSource
 }
 
 // NewHandler constructs a Handler.
-func NewHandler(client DispatchClient, caps CapabilitiesSource) *Handler {
-	return &Handler{client: client, caps: caps}
+func NewHandler(disp Dispatcher, caps CapabilitiesSource) *Handler {
+	return &Handler{disp: disp, caps: caps}
 }
 
-// Routes builds restd's route table (Go 1.22+ ServeMux method+wildcard
+// Routes builds vialrgbd's route table (Go 1.22+ ServeMux method+wildcard
 // patterns — no external router dependency needed).
 func (h *Handler) Routes() *http.ServeMux {
 	mux := http.NewServeMux()
@@ -2026,7 +2475,7 @@ func (h *Handler) setKey(w http.ResponseWriter, r *http.Request) {
 	}
 
 	index, found, err := h.caps.IndexFor(r.Context(), device, row, col)
-	if errors.Is(err, errDeviceNotFound) {
+	if errors.Is(err, dispatcher.ErrDeviceNotFound) {
 		writeError(w, http.StatusNotFound, err)
 		return
 	}
@@ -2039,18 +2488,8 @@ func (h *Handler) setKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	args, err := json.Marshal(ipc.SetKeyArgs{Device: device, Index: index, H: hue, S: sat, V: val})
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	resp, err := h.client.Do(r.Context(), ipc.Request{Op: ipc.OpSetKey, Args: args})
-	if err != nil {
-		writeError(w, http.StatusServiceUnavailable, err)
-		return
-	}
-	if !resp.OK {
-		writeError(w, statusForResponse(resp), errors.New(resp.Error))
+	if err := h.disp.SetKey(r.Context(), device, index, hue, sat, val); err != nil {
+		writeError(w, statusForDispatchErr(err), err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -2069,15 +2508,11 @@ func parsePos(pos string) (row, col uint8, err error) {
 	return uint8(r), uint8(c), nil
 }
 
-func statusForResponse(resp ipc.Response) int {
-	switch resp.Code {
-	case ipc.ErrNotFound:
+func statusForDispatchErr(err error) int {
+	if errors.Is(err, dispatcher.ErrDeviceNotFound) {
 		return http.StatusNotFound
-	case ipc.ErrBadRequest:
-		return http.StatusBadRequest
-	default:
-		return http.StatusServiceUnavailable
 	}
+	return http.StatusServiceUnavailable
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -2091,27 +2526,11 @@ func writeError(w http.ResponseWriter, status int, err error) {
 }
 ```
 
-Note: this step references `errDeviceNotFound`, defined in Task 11's
-`caps.go` (the next task). Task 11 must land before this compiles — the
-tests above are written first per TDD, but don't run `go build`/`go test`
-successfully until Task 11's file exists too. This is expected; run both
-tasks' Step 2/Step 4 back to back if executing them in the same session.
+- [ ] **Step 3: Verify** — after landing Task 11's `CapabilitiesCache` and
+`listDevices`/`getCapabilities` handlers in the same commit, `go test
+./internal/api/...` passes.
 
-- [ ] **Step 4: Run tests — expect them to still fail until Task 11 lands**
-
-```bash
-go vet ./internal/api/...
-```
-
-Expected: `errDeviceNotFound undefined` — this is expected at this point;
-proceed directly to Task 11, then return and run the full test suite.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add internal/api/handlers.go internal/api/handlers_test.go
-git commit -m "Add internal/api PUT /devices/{name}/keys/{pos} handler"
-```
+- [ ] **Step 4: Commit** — see Task 11 (combined commit).
 
 ---
 
@@ -2119,38 +2538,37 @@ git commit -m "Add internal/api PUT /devices/{name}/keys/{pos} handler"
 
 **Files:**
 - Create: `internal/api/caps.go`
-- Test: `internal/api/caps_test.go`
-- Test: `internal/api/handlers_list_test.go`
+- Create: `internal/api/caps_test.go`
+- Modify: `internal/api/handlers.go` (add `listDevices`/`getCapabilities`)
+- Create: `internal/api/handlers_list_test.go`
+
+`CapabilitiesCache` implements `CapabilitiesSource` by calling
+`Dispatcher.GetCapabilities` once per device and caching the row,col->index
+mapping, since each `GetCapabilities` call is a full HID round trip (one
+`VIALRGB_GET_NUMBER_LEDS` plus one `VIALRGB_GET_LED_INFO` per LED) — every
+`PUT` would otherwise re-walk the whole matrix before setting one key. Land
+this together with Task 10 (see that task's note).
 
 - [ ] **Step 1: Write the failing tests**
 
 `internal/api/caps_test.go`:
-
 ```go
 package api
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
 	"testing"
 
-	"github.com/seefood/vialrgb-notify/internal/ipc"
+	"github.com/seefood/vialrgb-notify/internal/dispatcher"
 )
 
 func TestCapabilitiesCacheIndexFor(t *testing.T) {
-	calls := 0
-	client := &fakeClient{do: func(_ context.Context, req ipc.Request) (ipc.Response, error) {
-		calls++
-		data, err := json.Marshal(ipc.Capabilities{
-			LEDCount:  2,
-			Positions: []ipc.LEDPosition{{Index: 0, Row: 1, Col: 1}, {Index: 1, Row: 2, Col: 2}},
-		})
-		if err != nil {
-			t.Fatalf("marshal: %v", err)
-		}
-		return ipc.Response{OK: true, Data: data}, nil
+	disp := &fakeDispatcher{caps: dispatcher.Capabilities{
+		LEDCount:  2,
+		Positions: []dispatcher.LEDPosition{{Index: 0, Row: 1, Col: 1}, {Index: 1, Row: 2, Col: 2}},
 	}}
-	cache := NewCapabilitiesCache(client)
+	cache := NewCapabilitiesCache(disp)
 
 	index, found, err := cache.IndexFor(context.Background(), "cxt12e4-0", 2, 2)
 	if err != nil || !found || index != 1 {
@@ -2159,29 +2577,26 @@ func TestCapabilitiesCacheIndexFor(t *testing.T) {
 	if _, _, err := cache.IndexFor(context.Background(), "cxt12e4-0", 1, 1); err != nil {
 		t.Fatalf("second IndexFor: %v", err)
 	}
-	if calls != 1 {
-		t.Errorf("connectord called %d times, want 1 (second call should hit the cache)", calls)
+	if disp.capsCalls != 1 {
+		t.Errorf("GetCapabilities called %d times, want 1 (second call should hit the cache)", disp.capsCalls)
 	}
 }
 
 func TestCapabilitiesCacheUnknownDevice(t *testing.T) {
-	client := &fakeClient{do: func(context.Context, ipc.Request) (ipc.Response, error) {
-		return ipc.Response{OK: false, Code: ipc.ErrNotFound, Error: "unknown device"}, nil
-	}}
-	cache := NewCapabilitiesCache(client)
+	disp := &fakeDispatcher{capsErr: dispatcher.ErrDeviceNotFound}
+	cache := NewCapabilitiesCache(disp)
 
 	_, _, err := cache.IndexFor(context.Background(), "nope", 0, 0)
-	if err == nil {
-		t.Fatal("IndexFor: want error for unknown device")
+	if !errors.Is(err, dispatcher.ErrDeviceNotFound) {
+		t.Fatalf("IndexFor error = %v, want ErrDeviceNotFound", err)
 	}
 }
 
 func TestCapabilitiesCacheNotPresent(t *testing.T) {
-	client := &fakeClient{do: func(context.Context, ipc.Request) (ipc.Response, error) {
-		data, _ := json.Marshal(ipc.Capabilities{LEDCount: 1, Positions: []ipc.LEDPosition{{Index: 0, Row: 0, Col: 0}}})
-		return ipc.Response{OK: true, Data: data}, nil
+	disp := &fakeDispatcher{caps: dispatcher.Capabilities{
+		LEDCount: 1, Positions: []dispatcher.LEDPosition{{Index: 0, Row: 0, Col: 0}},
 	}}
-	cache := NewCapabilitiesCache(client)
+	cache := NewCapabilitiesCache(disp)
 
 	_, found, err := cache.IndexFor(context.Background(), "cxt12e4-0", 9, 9)
 	if err != nil || found {
@@ -2191,29 +2606,21 @@ func TestCapabilitiesCacheNotPresent(t *testing.T) {
 ```
 
 `internal/api/handlers_list_test.go`:
-
 ```go
 package api
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
-	"github.com/seefood/vialrgb-notify/internal/ipc"
+	"github.com/seefood/vialrgb-notify/internal/dispatcher"
 )
 
 func TestListDevices(t *testing.T) {
-	client := &fakeClient{do: func(_ context.Context, req ipc.Request) (ipc.Response, error) {
-		if req.Op != ipc.OpListDevices {
-			t.Fatalf("Op = %q, want %q", req.Op, ipc.OpListDevices)
-		}
-		data, _ := json.Marshal(ipc.ListDevicesResult{Devices: []ipc.DeviceSummary{{Name: "cxt12e4-0", Connected: true}}})
-		return ipc.Response{OK: true, Data: data}, nil
-	}}
-	h := NewHandler(client, &fakeCaps{})
+	disp := &fakeDispatcher{listResult: []dispatcher.DeviceSummary{{Name: "cxt12e4-0", Connected: true}}}
+	h := NewHandler(disp, &fakeCaps{})
 
 	rec := httptest.NewRecorder()
 	h.Routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/devices", nil))
@@ -2221,20 +2628,18 @@ func TestListDevices(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
-	var result ipc.ListDevicesResult
+	var result []dispatcher.DeviceSummary
 	if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if len(result.Devices) != 1 || result.Devices[0].Name != "cxt12e4-0" {
+	if len(result) != 1 || result[0].Name != "cxt12e4-0" {
 		t.Errorf("result = %+v", result)
 	}
 }
 
 func TestGetCapabilitiesUnknownDevice(t *testing.T) {
-	client := &fakeClient{do: func(context.Context, ipc.Request) (ipc.Response, error) {
-		return ipc.Response{OK: false, Code: ipc.ErrNotFound, Error: "unknown device"}, nil
-	}}
-	h := NewHandler(client, &fakeCaps{})
+	disp := &fakeDispatcher{capsErr: dispatcher.ErrDeviceNotFound}
+	h := NewHandler(disp, &fakeCaps{})
 
 	rec := httptest.NewRecorder()
 	h.Routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/devices/nope", nil))
@@ -2245,46 +2650,36 @@ func TestGetCapabilitiesUnknownDevice(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run tests, verify they fail**
+Run: `go test ./internal/api/...` — fails, `NewCapabilitiesCache` undefined
+and `listDevices`/`getCapabilities` routes 404 (unregistered).
 
-```bash
-go test ./internal/api/...
-```
-
-Expected: `FAIL` — `NewCapabilitiesCache`, `errDeviceNotFound` undefined.
-
-- [ ] **Step 3: Implement**
+- [ ] **Step 2: Implement**
 
 `internal/api/caps.go`:
-
 ```go
 package api
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"sync"
 
-	"github.com/seefood/vialrgb-notify/internal/ipc"
+	"github.com/seefood/vialrgb-notify/internal/dispatcher"
 )
 
-var errDeviceNotFound = errors.New("api: unknown device")
-
 // CapabilitiesCache implements CapabilitiesSource by calling
-// GetCapabilities through client on first use per device, caching the
+// Dispatcher.GetCapabilities on first use per device and caching the
 // row,col->index mapping for subsequent PUTs. Phase 1+2 has no cache
 // invalidation on device reconnect/hotplug — a later phase's job, not this
-// one's.
+// one's; a device's physical matrix doesn't change across a replug anyway.
 type CapabilitiesCache struct {
-	client DispatchClient
-	mu     sync.Mutex
-	byDev  map[string]ipc.Capabilities
+	disp  Dispatcher
+	mu    sync.Mutex
+	byDev map[string]dispatcher.Capabilities
 }
 
 // NewCapabilitiesCache constructs a CapabilitiesCache.
-func NewCapabilitiesCache(client DispatchClient) *CapabilitiesCache {
-	return &CapabilitiesCache{client: client, byDev: make(map[string]ipc.Capabilities)}
+func NewCapabilitiesCache(disp Dispatcher) *CapabilitiesCache {
+	return &CapabilitiesCache{disp: disp, byDev: make(map[string]dispatcher.Capabilities)}
 }
 
 // IndexFor implements CapabilitiesSource.
@@ -2301,7 +2696,7 @@ func (c *CapabilitiesCache) IndexFor(ctx context.Context, device string, row, co
 	return 0, false, nil
 }
 
-func (c *CapabilitiesCache) capabilities(ctx context.Context, device string) (ipc.Capabilities, error) {
+func (c *CapabilitiesCache) capabilities(ctx context.Context, device string) (dispatcher.Capabilities, error) {
 	c.mu.Lock()
 	caps, ok := c.byDev[device]
 	c.mu.Unlock()
@@ -2309,22 +2704,9 @@ func (c *CapabilitiesCache) capabilities(ctx context.Context, device string) (ip
 		return caps, nil
 	}
 
-	args, err := json.Marshal(ipc.GetCapabilitiesArgs{Device: device})
+	caps, err := c.disp.GetCapabilities(ctx, device)
 	if err != nil {
-		return ipc.Capabilities{}, err
-	}
-	resp, err := c.client.Do(ctx, ipc.Request{Op: ipc.OpGetCapabilities, Args: args})
-	if err != nil {
-		return ipc.Capabilities{}, err
-	}
-	if !resp.OK {
-		if resp.Code == ipc.ErrNotFound {
-			return ipc.Capabilities{}, errDeviceNotFound
-		}
-		return ipc.Capabilities{}, errors.New(resp.Error)
-	}
-	if err := json.Unmarshal(resp.Data, &caps); err != nil {
-		return ipc.Capabilities{}, err
+		return dispatcher.Capabilities{}, err
 	}
 
 	c.mu.Lock()
@@ -2335,21 +2717,11 @@ func (c *CapabilitiesCache) capabilities(ctx context.Context, device string) (ip
 ```
 
 Append to `internal/api/handlers.go`:
-
 ```go
 func (h *Handler) listDevices(w http.ResponseWriter, r *http.Request) {
-	resp, err := h.client.Do(r.Context(), ipc.Request{Op: ipc.OpListDevices})
+	result, err := h.disp.ListDevices(r.Context())
 	if err != nil {
-		writeError(w, http.StatusServiceUnavailable, err)
-		return
-	}
-	if !resp.OK {
-		writeError(w, statusForResponse(resp), errors.New(resp.Error))
-		return
-	}
-	var result ipc.ListDevicesResult
-	if err := json.Unmarshal(resp.Data, &result); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
+		writeError(w, statusForDispatchErr(err), err)
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
@@ -2357,43 +2729,24 @@ func (h *Handler) listDevices(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) getCapabilities(w http.ResponseWriter, r *http.Request) {
 	device := r.PathValue("name")
-	args, err := json.Marshal(ipc.GetCapabilitiesArgs{Device: device})
+	caps, err := h.disp.GetCapabilities(r.Context(), device)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	resp, err := h.client.Do(r.Context(), ipc.Request{Op: ipc.OpGetCapabilities, Args: args})
-	if err != nil {
-		writeError(w, http.StatusServiceUnavailable, err)
-		return
-	}
-	if !resp.OK {
-		writeError(w, statusForResponse(resp), errors.New(resp.Error))
-		return
-	}
-	var caps ipc.Capabilities
-	if err := json.Unmarshal(resp.Data, &caps); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
+		writeError(w, statusForDispatchErr(err), err)
 		return
 	}
 	writeJSON(w, http.StatusOK, caps)
 }
 ```
 
-- [ ] **Step 4: Run the full `internal/api` suite, verify it passes**
+- [ ] **Step 3: Verify**
 
-```bash
-go test ./internal/api/... -v
-```
+Run: `go test ./internal/api/...` — all of Task 10/11's tests pass.
 
-Expected: all `PASS`, including Task 10's tests that were pending on
-`errDeviceNotFound`.
-
-- [ ] **Step 5: Commit**
+- [ ] **Step 4: Commit**
 
 ```bash
 git add internal/api
-git commit -m "Add internal/api capabilities cache and GET /devices routes"
+git commit -m "Add internal/api handlers backed directly by internal/dispatcher"
 ```
 
 ---
@@ -2596,7 +2949,7 @@ listeners:
   socket:
     path: /tmp/api.sock
   tcp:
-    address: 0.0.0.0:8080
+    address: 0.0.0.0:49994
 `)
 	if _, err := Load(path); err == nil {
 		t.Fatal("Load: want error for TCP listener without a token")
@@ -2624,33 +2977,32 @@ Expected: `FAIL` — package doesn't exist yet.
 `config/config.go`:
 
 ```go
-// Package config loads connectord's on-disk configuration
-// (~/.config/vialrgb-notify/config.yaml). connectord owns loading this
-// whole file and hands restd only the fields it needs over the socketpair
-// at startup, per the design spec's Config section.
+// Package config loads vialrgbd's on-disk configuration
+// (~/.config/vialrgb-notify/config.yaml), read once at startup, per the
+// design spec's Config section.
 package config
 
 import (
 	"fmt"
 	"os"
 
-	"gopkg.in/yaml.v3"
+	"github.com/goccy/go-yaml"
 )
 
-// Config is connectord's on-disk configuration.
+// Config is vialrgbd's on-disk configuration.
 type Config struct {
 	Naming    NamingRule `yaml:"naming"`
 	Listeners Listeners  `yaml:"listeners"`
 }
 
-// NamingRule selects connectord's preferred device-naming strategy; it
-// still falls back automatically per device if a device can't answer
+// NamingRule selects vialrgbd's preferred device-naming strategy; it still
+// falls back automatically per device if a device can't answer
 // GetKeyboardUID.
 type NamingRule struct {
 	Prefer string `yaml:"prefer"` // "uid" (default), "path", or "vidpid"
 }
 
-// Listeners configures restd's listeners.
+// Listeners configures vialrgbd's listeners.
 type Listeners struct {
 	Socket SocketListener `yaml:"socket"`
 	TCP    *TCPListener   `yaml:"tcp,omitempty"` // nil = disabled (off by default)
@@ -2663,7 +3015,10 @@ type SocketListener struct {
 
 // TCPListener is only present in the config when explicitly enabled; Load
 // rejects one with no Token, per the spec's hard requirement that TCP is
-// never allowed without one.
+// never allowed without one. There's no in-code default — actually binding
+// this listener is deferred past this plan (see "Explicitly deferred past
+// this plan" below) — but wherever a concrete example is needed (docs,
+// example config.yaml), the chosen default port is :49994.
 type TCPListener struct {
 	Address string `yaml:"address"`
 	Token   string `yaml:"token"`
@@ -2706,439 +3061,75 @@ git commit -m "Add config package: YAML loading with TCP-requires-token validati
 
 ---
 
-## Task 14: `cmd/connectord` — RPC server loop
+## Task 14: `cmd/vialrgbd` — `main()`
 
 **Files:**
-- Create: `cmd/connectord/rpc.go`
-- Test: `cmd/connectord/rpc_test.go`
+- Create: `cmd/vialrgbd/main.go`
+- Create: `cmd/vialrgbd/main_test.go`
 
-- [ ] **Step 1: Write the failing tests**
+This replaces the old `connectord`/`restd` split entirely: one binary
+enumerates devices, owns the `internal/dispatcher.Dispatcher`, runs the
+hotplug-poll and periodic-redraw loops from Task 9, and serves
+`internal/api`'s HTTP handlers over a Unix socket. Most of this is wiring
+code tying together real HID hardware (`deviceState.refresh`/`probeUID`
+call cgo-backed `go-hid` against actual devices) — not unit-testable
+without hardware, and exercised instead by Task 17's manual/gated hardware
+check, per the design spec's testing plan. The one piece of pure logic —
+whether to log a root-fallback warning — is unit tested here.
 
-`cmd/connectord/rpc_test.go`:
+Per the design spec's macOS/Linux privilege sections: `vialrgbd` never drops
+privilege. There's no spawned child left to drop it for (unlike the old
+`connectord`/`restd` split's `credentialForRestd`, which this plan no longer
+needs), and the design spec bans `syscall.Setuid`/`Setgid` on an
+already-running process outright (`golang/go#1435`), so `vialrgbd` couldn't
+safely de-escalate itself even if it wanted to. Running as root is purely
+the Linux udev-rule-unavailable fallback; `warnIfRootFallback` just makes
+that posture loud, since now the *entire* HTTP surface — not just raw HID
+I/O — would be running with it.
 
+- [ ] **Step 1: Write the failing test**
+
+`cmd/vialrgbd/main_test.go`:
 ```go
 package main
 
 import (
-	"encoding/json"
-	"net"
-	"testing"
-
-	"github.com/seefood/vialrgb-notify/internal/hid"
-	"github.com/seefood/vialrgb-notify/internal/ipc"
-)
-
-// fakeController substitutes for *hid.Device in tests — no real hardware
-// needed.
-type fakeController struct {
-	numLEDs   uint16
-	positions map[uint16][2]uint8
-	lastSet   []hid.KeyColor
-}
-
-func (f *fakeController) SetKeys(keys []hid.KeyColor) error {
-	f.lastSet = keys
-	return nil
-}
-
-func (f *fakeController) GetNumberLEDs() (uint16, error) { return f.numLEDs, nil }
-
-func (f *fakeController) GetLEDInfo(index uint16) (uint8, uint8, error) {
-	pos := f.positions[index]
-	return pos[0], pos[1], nil
-}
-
-func (f *fakeController) Close() error { return nil }
-
-func mustJSON(t *testing.T, v any) json.RawMessage {
-	t.Helper()
-	b, err := json.Marshal(v)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-	return b
-}
-
-func TestHandleSetKeyUnknownDevice(t *testing.T) {
-	resp := handle(ipc.Request{Op: ipc.OpSetKey, Args: mustJSON(t, ipc.SetKeyArgs{Device: "missing"})}, devices{})
-	if resp.OK {
-		t.Fatal("want OK=false for unknown device")
-	}
-	if resp.Code != ipc.ErrNotFound {
-		t.Errorf("Code = %q, want %q", resp.Code, ipc.ErrNotFound)
-	}
-}
-
-func TestHandleSetKey(t *testing.T) {
-	fc := &fakeController{}
-	devs := devices{"cxt12e4-0": fc}
-	resp := handle(ipc.Request{
-		Op:   ipc.OpSetKey,
-		Args: mustJSON(t, ipc.SetKeyArgs{Device: "cxt12e4-0", Index: 5, H: 0, S: 255, V: 255}),
-	}, devs)
-	if !resp.OK {
-		t.Fatalf("resp not OK: %+v", resp)
-	}
-	if len(fc.lastSet) != 1 || fc.lastSet[0].Index != 5 {
-		t.Errorf("SetKeys called with %+v", fc.lastSet)
-	}
-}
-
-func TestHandleGetCapabilities(t *testing.T) {
-	fc := &fakeController{numLEDs: 2, positions: map[uint16][2]uint8{0: {1, 1}, 1: {2, 2}}}
-	devs := devices{"cxt12e4-0": fc}
-	resp := handle(ipc.Request{
-		Op:   ipc.OpGetCapabilities,
-		Args: mustJSON(t, ipc.GetCapabilitiesArgs{Device: "cxt12e4-0"}),
-	}, devs)
-	if !resp.OK {
-		t.Fatalf("resp not OK: %+v", resp)
-	}
-	var caps ipc.Capabilities
-	if err := json.Unmarshal(resp.Data, &caps); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if caps.LEDCount != 2 || len(caps.Positions) != 2 {
-		t.Errorf("caps = %+v", caps)
-	}
-}
-
-func TestServeConnOverPipe(t *testing.T) {
-	client, server := net.Pipe()
-	defer client.Close()
-
-	devs := devices{"cxt12e4-0": &fakeController{}}
-	go func() { _ = serveConn(ipc.NetConn{Conn: server}, devs) }()
-
-	req := ipc.Request{Op: ipc.OpSetKey, Args: mustJSON(t, ipc.SetKeyArgs{Device: "cxt12e4-0", Index: 0})}
-	if err := ipc.WriteFrame(client, req); err != nil {
-		t.Fatalf("WriteFrame: %v", err)
-	}
-	var resp ipc.Response
-	if err := ipc.ReadFrame(client, &resp); err != nil {
-		t.Fatalf("ReadFrame: %v", err)
-	}
-	if !resp.OK {
-		t.Fatalf("resp not OK: %+v", resp)
-	}
-}
-```
-
-- [ ] **Step 2: Run tests, verify they fail**
-
-```bash
-go test ./cmd/connectord/...
-```
-
-Expected: `FAIL` — package doesn't exist yet.
-
-- [ ] **Step 3: Implement**
-
-`cmd/connectord/rpc.go`:
-
-```go
-package main
-
-import (
-	"encoding/json"
-	"fmt"
-
-	"github.com/seefood/vialrgb-notify/internal/hid"
-	"github.com/seefood/vialrgb-notify/internal/ipc"
-)
-
-// devices is connectord's view of currently known devices: name -> open
-// controller. Populated at startup from hid.Enumerate + hid.AssignNames.
-type devices map[string]hid.Controller
-
-// serveConn runs connectord's side of the internal link: read one Request,
-// dispatch it against devs, write one Response, repeat until a frame read
-// errors (peer closed). Strictly synchronous per the design spec — one
-// request in flight, no concurrent access to any hid.Controller.
-func serveConn(conn ipc.Conn, devs devices) error {
-	for {
-		var req ipc.Request
-		if err := conn.ReadFrame(&req); err != nil {
-			return err
-		}
-		if err := conn.WriteFrame(handle(req, devs)); err != nil {
-			return err
-		}
-	}
-}
-
-func handle(req ipc.Request, devs devices) ipc.Response {
-	switch req.Op {
-	case ipc.OpSetKey:
-		return handleSetKey(req, devs)
-	case ipc.OpSetKeys:
-		return handleSetKeys(req, devs)
-	case ipc.OpListDevices:
-		return handleListDevices(devs)
-	case ipc.OpGetCapabilities:
-		return handleGetCapabilities(req, devs)
-	default:
-		return errResponse(ipc.ErrBadRequest, fmt.Sprintf("connectord: unknown op %q", req.Op))
-	}
-}
-
-func handleSetKey(req ipc.Request, devs devices) ipc.Response {
-	var args ipc.SetKeyArgs
-	if err := json.Unmarshal(req.Args, &args); err != nil {
-		return errResponse(ipc.ErrBadRequest, err.Error())
-	}
-	dev, ok := devs[args.Device]
-	if !ok {
-		return errResponse(ipc.ErrNotFound, fmt.Sprintf("connectord: unknown device %q", args.Device))
-	}
-	if err := dev.SetKeys([]hid.KeyColor{{Index: args.Index, H: args.H, S: args.S, V: args.V}}); err != nil {
-		return errResponse(ipc.ErrUnavailable, err.Error())
-	}
-	return ipc.Response{OK: true}
-}
-
-func handleSetKeys(req ipc.Request, devs devices) ipc.Response {
-	var args ipc.SetKeysArgs
-	if err := json.Unmarshal(req.Args, &args); err != nil {
-		return errResponse(ipc.ErrBadRequest, err.Error())
-	}
-	dev, ok := devs[args.Device]
-	if !ok {
-		return errResponse(ipc.ErrNotFound, fmt.Sprintf("connectord: unknown device %q", args.Device))
-	}
-	keys := make([]hid.KeyColor, len(args.Keys))
-	for i, k := range args.Keys {
-		keys[i] = hid.KeyColor{Index: k.Index, H: k.H, S: k.S, V: k.V}
-	}
-	if err := dev.SetKeys(keys); err != nil {
-		return errResponse(ipc.ErrUnavailable, err.Error())
-	}
-	return ipc.Response{OK: true}
-}
-
-func handleListDevices(devs devices) ipc.Response {
-	result := ipc.ListDevicesResult{}
-	for name := range devs {
-		result.Devices = append(result.Devices, ipc.DeviceSummary{Name: name, Connected: true})
-	}
-	data, err := json.Marshal(result)
-	if err != nil {
-		return errResponse(ipc.ErrUnavailable, err.Error())
-	}
-	return ipc.Response{OK: true, Data: data}
-}
-
-func handleGetCapabilities(req ipc.Request, devs devices) ipc.Response {
-	var args ipc.GetCapabilitiesArgs
-	if err := json.Unmarshal(req.Args, &args); err != nil {
-		return errResponse(ipc.ErrBadRequest, err.Error())
-	}
-	dev, ok := devs[args.Device]
-	if !ok {
-		return errResponse(ipc.ErrNotFound, fmt.Sprintf("connectord: unknown device %q", args.Device))
-	}
-	n, err := dev.GetNumberLEDs()
-	if err != nil {
-		return errResponse(ipc.ErrUnavailable, err.Error())
-	}
-	caps := ipc.Capabilities{LEDCount: int(n)}
-	for i := uint16(0); i < n; i++ {
-		row, col, err := dev.GetLEDInfo(i)
-		if err != nil {
-			return errResponse(ipc.ErrUnavailable, err.Error())
-		}
-		caps.Positions = append(caps.Positions, ipc.LEDPosition{Index: i, Row: row, Col: col})
-	}
-	data, err := json.Marshal(caps)
-	if err != nil {
-		return errResponse(ipc.ErrUnavailable, err.Error())
-	}
-	return ipc.Response{OK: true, Data: data}
-}
-
-func errResponse(code ipc.ErrorCode, msg string) ipc.Response {
-	return ipc.Response{OK: false, Code: code, Error: msg}
-}
-```
-
-- [ ] **Step 4: Run tests, verify they pass**
-
-```bash
-go test ./cmd/connectord/... -v
-```
-
-Expected: all `PASS`.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add cmd/connectord/rpc.go cmd/connectord/rpc_test.go
-git commit -m "Add cmd/connectord RPC server loop"
-```
-
----
-
-## Task 15: `cmd/connectord` — `main()`
-
-**Files:**
-- Create: `cmd/connectord/main.go`
-
-This is wiring code tying together real HID hardware, process spawning, and
-OS file descriptors — not unit-testable without hardware and a real child
-process. It's verified by `go build` here and by Task 19's manual/gated
-hardware check, per the design spec's testing plan ("Manual/gated:
-real-hardware round-trip check, documented but not automated").
-
-- [ ] **Step 1: Implement**
-
-`cmd/connectord/main.go`:
-
-```go
-package main
-
-import (
+	"bytes"
 	"log/slog"
-	"net"
-	"os"
-	"os/exec"
-	"path/filepath"
-	"syscall"
-
-	goHid "github.com/sstallion/go-hid"
-
-	"github.com/seefood/vialrgb-notify/internal/hid"
-	"github.com/seefood/vialrgb-notify/internal/ipc"
+	"strings"
+	"testing"
 )
 
-func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
-
-	if err := goHid.Init(); err != nil {
-		logger.Error("hid init failed", "err", err)
-		os.Exit(1)
-	}
-	defer func() { _ = goHid.Exit() }()
-
-	infos, err := hid.Enumerate()
-	if err != nil {
-		logger.Error("enumerate failed", "err", err)
-		os.Exit(1)
-	}
-
-	identities := make([]hid.Identity, 0, len(infos))
-	for _, info := range infos {
-		uid, hasUID := probeUID(info.Path, logger)
-		identities = append(identities, hid.Identity{
-			Path: info.Path, VendorID: info.VendorID, ProductID: info.ProductID,
-			UID: uid, HasUID: hasUID,
-		})
-	}
-	named := hid.AssignNames(identities)
-
-	devs := make(devices, len(named))
-	for _, n := range named {
-		dev, err := hid.Open(n.Path)
-		if err != nil {
-			logger.Warn("could not open device", "name", n.Name, "err", err)
-			continue
-		}
-		if err := dev.SetDirectMode(); err != nil {
-			logger.Warn("could not set direct mode", "name", n.Name, "err", err)
-		}
-		devs[n.Name] = dev
-	}
-
-	fds, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_STREAM, 0)
-	if err != nil {
-		logger.Error("socketpair failed", "err", err)
-		os.Exit(1)
-	}
-	parentFile := os.NewFile(uintptr(fds[0]), "connectord-ipc")
-	childFile := os.NewFile(uintptr(fds[1]), "restd-ipc")
-
-	cmd := exec.Command(restdPath())
-	cmd.ExtraFiles = []*os.File{childFile}
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Start(); err != nil {
-		logger.Error("failed to spawn restd", "err", err)
-		os.Exit(1)
-	}
-	_ = childFile.Close() // connectord's copy of restd's end; restd holds its own via inherited fd 3
-
-	netConn, err := net.FileConn(parentFile)
-	if err != nil {
-		logger.Error("could not wrap ipc fd", "err", err)
-		os.Exit(1)
-	}
-
-	// Phase 1 supervision: restart-together-on-exit. When the link errors
-	// (restd died), fall through and exit; the OS-level process manager
-	// (LaunchAgent/systemd) is responsible for restarting connectord, which
-	// then spawns a fresh restd. Smarter in-process supervision is future
-	// work, not required here.
-	if err := serveConn(ipc.NetConn{Conn: netConn}, devs); err != nil {
-		logger.Error("ipc connection closed", "err", err)
-	}
-	if err := cmd.Wait(); err != nil {
-		logger.Warn("restd exited", "err", err)
+func TestWarnIfRootFallback_NonLinux(t *testing.T) {
+	var buf bytes.Buffer
+	warnIfRootFallback("darwin", 0, slog.New(slog.NewTextHandler(&buf, nil)))
+	if buf.Len() != 0 {
+		t.Errorf("expected no log output on non-Linux, got %q", buf.String())
 	}
 }
 
-func probeUID(path string, logger *slog.Logger) (uid [8]byte, hasUID bool) {
-	dev, err := hid.Open(path)
-	if err != nil {
-		logger.Warn("could not open candidate device", "path", path, "err", err)
-		return uid, false
+func TestWarnIfRootFallback_LinuxNonRoot(t *testing.T) {
+	var buf bytes.Buffer
+	warnIfRootFallback("linux", 1000, slog.New(slog.NewTextHandler(&buf, nil)))
+	if buf.Len() != 0 {
+		t.Errorf("expected no log output for non-root, got %q", buf.String())
 	}
-	defer func() { _ = dev.Close() }()
-	uid, err = dev.GetKeyboardUID()
-	if err != nil {
-		return uid, false
-	}
-	return uid, true
 }
 
-func restdPath() string {
-	dir, err := os.Executable()
-	if err != nil {
-		return "restd"
+func TestWarnIfRootFallback_LinuxRoot(t *testing.T) {
+	var buf bytes.Buffer
+	warnIfRootFallback("linux", 0, slog.New(slog.NewTextHandler(&buf, nil)))
+	if !strings.Contains(buf.String(), "running as root") {
+		t.Errorf("expected a root-fallback warning, got %q", buf.String())
 	}
-	return filepath.Join(filepath.Dir(dir), "restd")
 }
 ```
 
-- [ ] **Step 2: Verify it builds**
+Run: `go test ./cmd/vialrgbd/...` — fails, package doesn't exist yet.
 
-```bash
-go build ./cmd/connectord
-```
+- [ ] **Step 2: Implement**
 
-Expected: exit 0, produces a `connectord` binary (remove it or build to
-`bin/` per Task 17's Makefile — don't commit the binary).
-
-- [ ] **Step 3: Commit**
-
-```bash
-rm -f connectord
-git add cmd/connectord/main.go
-git commit -m "Add cmd/connectord main(): enumerate, spawn restd, serve IPC"
-```
-
----
-
-## Task 16: `cmd/restd` — `main()`
-
-**Files:**
-- Create: `cmd/restd/main.go`
-
-Also wiring code (real listeners, real inherited fd) — verified by `go
-build` and Task 19's manual check, same rationale as Task 15.
-
-- [ ] **Step 1: Implement**
-
-`cmd/restd/main.go`:
-
+`cmd/vialrgbd/main.go`:
 ```go
 package main
 
@@ -3149,36 +3140,47 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
+	"sort"
 	"time"
+
+	goHid "github.com/sstallion/go-hid"
 
 	"github.com/seefood/vialrgb-notify/internal/api"
 	"github.com/seefood/vialrgb-notify/internal/dispatcher"
-	"github.com/seefood/vialrgb-notify/internal/ipc"
+	"github.com/seefood/vialrgb-notify/internal/hid"
 )
 
 const (
-	dispatcherQueueDepth = 64
-	linkTimeout          = 1 * time.Second
+	dispatcherQueueDepth  = 64
+	enumeratePollInterval = 1 * time.Second
 )
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
+	warnIfRootFallback(runtime.GOOS, os.Geteuid(), logger)
 
-	// fd 3 is connectord's end of the socketpair, inherited via
-	// exec.Cmd.ExtraFiles (os/exec's doc: "entry i becomes file descriptor
-	// 3+i").
-	ipcFile := os.NewFile(3, "connectord-ipc")
-	netConn, err := net.FileConn(ipcFile)
-	if err != nil {
-		logger.Error("could not wrap inherited ipc fd", "err", err)
+	if err := goHid.Init(); err != nil {
+		logger.Error("hid init failed", "err", err)
 		os.Exit(1)
 	}
-	conn := ipc.NetConn{Conn: netConn}
+	defer func() { _ = goHid.Exit() }()
 
-	disp := dispatcher.New(conn, dispatcherQueueDepth, linkTimeout)
+	registry := dispatcher.NewRegistry()
+	cache := dispatcher.NewCache()
+	disp := dispatcher.New(registry, cache, dispatcherQueueDepth)
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go disp.Run(ctx)
+
+	state := newDeviceState()
+	// Initial enumeration, synchronous, so devices are known before HTTP
+	// traffic starts.
+	registry.Reconcile(state.refresh(logger), time.Now(), dispatcher.UntetheredMaxAge)
+
+	go pollForDevices(ctx, state, registry, cache, disp, logger)
+	go disp.RunPeriodicRedraw(ctx, dispatcher.RedrawInterval, logger)
 
 	caps := api.NewCapabilitiesCache(disp)
 	handler := api.NewHandler(disp, caps)
@@ -3199,10 +3201,152 @@ func main() {
 		os.Exit(1)
 	}
 
-	logger.Info("restd listening", "socket", socketPath)
+	logger.Info("vialrgbd listening", "socket", socketPath)
 	if err := http.Serve(listener, handler.Routes()); err != nil {
 		logger.Error("http server exited", "err", err)
 		os.Exit(1)
+	}
+}
+
+// warnIfRootFallback logs a prominent warning when vialrgbd is running as
+// root on Linux — the design spec's fallback path for when no udev rule can
+// be installed. Unlike the old connectord/restd split, there is no
+// unprivileged process left to isolate the HTTP surface behind: root here
+// means the whole daemon, including any future TCP listener, runs as root.
+// Per the design spec's ban on syscall.Setuid/Setgid on a running process
+// (golang/go#1435), vialrgbd cannot safely de-escalate itself even if it
+// wanted to — this function only warns, it never attempts to drop privilege.
+func warnIfRootFallback(goos string, euid int, logger *slog.Logger) {
+	if goos != "linux" || euid != 0 {
+		return
+	}
+	logger.Warn("vialrgbd is running as root — this is the udev-rule-unavailable " +
+		"fallback and runs the entire HTTP surface (including any future TCP " +
+		"listener) as root too; install a udev rule granting the logged-in user " +
+		"access to the device instead, per the design spec's Background section")
+}
+
+// openDevice pairs an open hid.Controller with the Identity it was opened
+// with, so deviceState can rebuild its dispatcher.PresentDevice set on every
+// poll without re-probing (and therefore re-opening) a path it already holds
+// open — HID opens are exclusive on macOS.
+type openDevice struct {
+	identity hid.Identity
+	ctrl     hid.Controller
+}
+
+// deviceState is cmd/vialrgbd's bookkeeping of currently open HID paths,
+// independent of internal/dispatcher.Registry's name-keyed view (a single
+// physical device's path is stable across polls; its assigned name is not
+// recomputed unless the whole present-device set changes composition).
+type deviceState struct {
+	openByPath map[string]openDevice
+}
+
+func newDeviceState() *deviceState {
+	return &deviceState{openByPath: make(map[string]openDevice)}
+}
+
+// refresh re-enumerates raw HID paths, opens newly-appeared ones, closes
+// controllers for paths that disappeared, and returns every currently open
+// device as a dispatcher.PresentDevice, ready for Registry.Reconcile — naming
+// itself (including dedup suffixing and reconnect/"untethered" rewire
+// matching) is entirely Reconcile's job now (Task 6), not this function's. A
+// transient enumerate error leaves the previous open set untouched rather
+// than treating every device as disconnected.
+func (ds *deviceState) refresh(logger *slog.Logger) []dispatcher.PresentDevice {
+	infos, err := hid.Enumerate()
+	if err != nil {
+		logger.Warn("enumerate failed", "err", err)
+		infos = nil
+	}
+
+	present := make(map[string]bool, len(infos))
+	for _, info := range infos {
+		present[info.Path] = true
+		if _, alreadyOpen := ds.openByPath[info.Path]; alreadyOpen {
+			continue
+		}
+		uid, hasUID := probeUID(info.Path, logger)
+		dev, err := hid.Open(info.Path)
+		if err != nil {
+			logger.Warn("could not open device", "path", info.Path, "err", err)
+			continue
+		}
+		if err := dev.SetDirectMode(); err != nil {
+			logger.Warn("could not set direct mode", "path", info.Path, "err", err)
+		}
+		ds.openByPath[info.Path] = openDevice{
+			identity: hid.Identity{
+				Path: info.Path, VendorID: info.VendorID, ProductID: info.ProductID,
+				UID: uid, HasUID: hasUID,
+			},
+			ctrl: dev,
+		}
+	}
+	for path, od := range ds.openByPath {
+		if !present[path] {
+			_ = od.ctrl.Close()
+			delete(ds.openByPath, path)
+		}
+	}
+
+	devices := make([]openDevice, 0, len(ds.openByPath))
+	for _, od := range ds.openByPath {
+		devices = append(devices, od)
+	}
+	// Map iteration order is randomized; sort by Path so Registry.Reconcile's
+	// dedup-suffix assignment (-0, -1, ...) for any never-before-seen
+	// colliding identity is stable across polls, instead of depending on Go's
+	// randomized map iteration order.
+	sort.Slice(devices, func(i, j int) bool { return devices[i].identity.Path < devices[j].identity.Path })
+
+	out := make([]dispatcher.PresentDevice, len(devices))
+	for i, od := range devices {
+		out[i] = dispatcher.PresentDevice{Identity: od.identity, Ctrl: od.ctrl}
+	}
+	return out
+}
+
+// probeUID opens its own short-lived handle to query the Vial keyboard UID
+// and closes it before the caller opens the real long-lived handle on the
+// same path — sequential, not concurrent, so it doesn't violate macOS's
+// exclusive-HID-open semantics.
+func probeUID(path string, logger *slog.Logger) (uid [8]byte, hasUID bool) {
+	dev, err := hid.Open(path)
+	if err != nil {
+		logger.Warn("could not open candidate device", "path", path, "err", err)
+		return uid, false
+	}
+	defer func() { _ = dev.Close() }()
+	uid, err = dev.GetKeyboardUID()
+	if err != nil {
+		return uid, false
+	}
+	return uid, true
+}
+
+// pollForDevices re-enumerates every enumeratePollInterval, reconciles
+// registry (rewiring reconnected devices, evicting stale-untethered ones per
+// Task 6), immediately redraws any device Reconcile reports as Reconnected —
+// the design spec's reconnect-triggered redraw, independent of (and faster
+// than) RunPeriodicRedraw's unconditional 5s sweep started separately in
+// main() — and forgets cache's entry for any device Reconcile reports as
+// Evicted, so a later device presenting that identity starts fresh.
+func pollForDevices(ctx context.Context, state *deviceState, registry *dispatcher.Registry, cache *dispatcher.Cache, disp *dispatcher.Dispatcher, logger *slog.Logger) {
+	ticker := time.NewTicker(enumeratePollInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			res := registry.Reconcile(state.refresh(logger), time.Now(), dispatcher.UntetheredMaxAge)
+			disp.RedrawReconnected(ctx, res.Reconnected, logger)
+			for _, name := range res.Evicted {
+				cache.Forget(name)
+			}
+		case <-ctx.Done():
+			return
+		}
 	}
 }
 
@@ -3218,34 +3362,21 @@ func socketPathFromEnv() string {
 }
 ```
 
-Note: the optional TCP listener (mandatory-token-when-enabled) and reading
-`config.Config` at startup are deferred to a follow-up task once Phase 1+2's
-core path is proven end to end — flagging this explicitly rather than
-silently shipping a stub, per the plan's scope: the design spec requires TCP
-be off by default, and this main() satisfies that by simply not offering it
-yet. Wiring config.Load and the TCP listener in is a small, mechanical
-addition once the Unix-socket path is confirmed working over real hardware
-(Task 19) — do not consider Phase 1+2 complete until that follow-up lands.
+- [ ] **Step 3: Verify**
 
-- [ ] **Step 2: Verify it builds**
+Run: `go build ./...` (verifies the whole tree compiles) and `go test
+./cmd/vialrgbd/...` (the three `warnIfRootFallback` cases pass).
+
+- [ ] **Step 4: Commit**
 
 ```bash
-go build ./cmd/restd
-```
-
-Expected: exit 0.
-
-- [ ] **Step 3: Commit**
-
-```bash
-rm -f restd
-git add cmd/restd/main.go
-git commit -m "Add cmd/restd main(): dispatcher, unix socket listener, routes"
+git add cmd/vialrgbd
+git commit -m "Add cmd/vialrgbd main: enumeration, hotplug/redraw loops, HTTP server"
 ```
 
 ---
 
-## Task 17: Build tooling and doc updates
+## Task 15: Build tooling and doc updates
 
 **Files:**
 - Create: `Makefile`
@@ -3255,13 +3386,11 @@ git commit -m "Add cmd/restd main(): dispatcher, unix socket listener, routes"
 - [ ] **Step 1: Add a Makefile**
 
 `Makefile`:
-
 ```makefile
 .PHONY: build test lint
 
 build:
-	go build -o bin/connectord ./cmd/connectord
-	go build -o bin/restd ./cmd/restd
+	go build -o bin/vialrgbd ./cmd/vialrgbd
 
 test:
 	go test ./...
@@ -3280,7 +3409,7 @@ Python smoke-test commands too (still valid as a protocol reference):
 ## Commands
 
 ```
-make build                        # builds bin/connectord and bin/restd
+make build                        # builds bin/vialrgbd
 make test                         # go test ./...
 make lint                         # prek run --all-files
 ```
@@ -3300,16 +3429,29 @@ uv run python set_key_color.py    # protocol smoke test against real hardware
 ```
 ```
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 3: Update the project state/architecture description in `CLAUDE.md`**
+
+Also update `CLAUDE.md`'s prose describing the `connectord`/`restd` two-process
+architecture to describe the single `vialrgbd` binary instead, matching the
+revised design spec (this plan's own header section has the up-to-date
+wording to reuse). In particular, the bullet points about the anonymous
+`socketpair`/`exec.Cmd.ExtraFiles` internal link, the "traffic cop"
+dispatcher description, and the privilege-drop-at-spawn-time rule no longer
+apply as written — replace them with: single dispatcher goroutine owns the
+open HID handles directly (no internal link at all), and
+`warnIfRootFallback` (Task 14) replaces the privilege-drop mechanism, since
+there is no spawned child left to drop privilege for.
+
+- [ ] **Step 4: Commit**
 
 ```bash
 git add Makefile CLAUDE.md README.md
-git commit -m "Add Makefile; update CLAUDE.md with Go build/test commands"
+git commit -m "Add Makefile; update CLAUDE.md for the single-binary vialrgbd architecture"
 ```
 
 ---
 
-## Task 18: Full integration pass
+## Task 16: Full integration pass
 
 **Files:** none (verification only)
 
@@ -3363,7 +3505,7 @@ git commit -m "Fix lint findings from full prek run"
 
 ---
 
-## Task 19: Manual/gated hardware round-trip check
+## Task 17: Manual/gated hardware round-trip check
 
 **Files:**
 - Create: `docs/superpowers/manual-checks/phase1-2-hardware-roundtrip.md`
@@ -3378,24 +3520,20 @@ flashed.
 - [ ] **Step 1: Write the checklist**
 
 `docs/superpowers/manual-checks/phase1-2-hardware-roundtrip.md`:
-
 ```markdown
 # Phase 1+2 hardware round-trip check
 
 Manual, gated on physical hardware — not run in CI. Run this after any
-change touching `internal/hid`, `cmd/connectord`, or the IPC/dispatcher
-path, before considering that change verified end-to-end.
+change touching `internal/hid`, `internal/dispatcher`, or `cmd/vialrgbd`,
+before considering that change verified end-to-end.
 
 Prerequisites: `cxt_studio/12e4` attached, `personal/vialrgb-direct/001-enable`
 firmware flashed (see `../../../README.md` and the parent `CXT-studio`
-tree's `../qmk_vial`). On macOS, the built `connectord` binary needs the
-Input Monitoring TCC grant on first run (see `README.md`'s "Why not Python"
-section for why this requires a stable code-signing identity).
+tree's `../qmk_vial`).
 
 1. `make build`
-2. Run `./bin/connectord` in a terminal you can watch logs in. Confirm it
-   logs enumerating the board and (on macOS, first run only) grant Input
-   Monitoring when prompted, then re-run.
+2. Run `./bin/vialrgbd` in a terminal you can watch logs in. Confirm it logs
+   enumerating the board.
 3. In a second terminal, list devices:
    ```bash
    curl --unix-socket ~/.local/state/vialrgb-notify/api.sock http://localhost/devices
@@ -3417,10 +3555,24 @@ section for why this requires a stable code-signing identity).
    ```
 6. Repeat step 5 with a named color (`"color":"green"`) and an HSV triple
    (`"color":"0,255,128"`), confirming visibly distinct results each time.
-7. Kill `restd`'s process directly (not `connectord`) and confirm
-   `connectord` also exits shortly after (Phase 1's restart-together
-   supervision) rather than hanging indefinitely.
+7. With both keys from steps 5–6 still colored, physically unplug and
+   replug the board. Confirm both colors reappear automatically within
+   ~1-2 seconds, with no new API call — the reconnect-triggered redraw
+   (`internal/dispatcher`'s `RedrawReconnected`, driven by `cmd/vialrgbd`'s
+   1s hotplug-poll loop). Also confirm `GET /devices` shows the *same* name
+   as step 3 (not a new `-0`-suffixed name) — this is the untethered-rewire
+   path (Task 6), not a fresh allocation.
+8. Set one key to a new color, then (without unplugging) wait at least 5
+   seconds and confirm nothing visibly changes — the unconditional
+   periodic redraw (`RunPeriodicRedraw`, every `dispatcher.RedrawInterval`)
+   re-asserting the same color is expected to be a no-op to the eye, not a
+   flicker or a reversion.
 ```
+
+The 24h untethered-eviction behavior (Task 6) is not practically checkable
+manually on this timescale — it's covered by
+`TestRegistryReconcileEvictsStaleUntethered` instead. Not this checklist's
+job to re-verify.
 
 - [ ] **Step 2: Commit**
 
@@ -3434,18 +3586,23 @@ git commit -m "Document the manual/gated Phase 1+2 hardware round-trip check"
 ## Explicitly deferred past this plan
 
 Matches the design spec's own "Explicitly out of scope for Phase 1+2"
-section, plus two items this plan itself deferred (flagged inline above,
-not silently dropped):
+section, plus items this plan itself deferred (flagged inline above, not
+silently dropped):
 
-- The optional TCP listener and its mandatory bearer token (Task 16's note).
-- Wiring `config.Load` into `cmd/restd`/`cmd/connectord` main()s (Task 16's
-  note) — both mains currently use hardcoded/env-var defaults instead.
+- The optional TCP listener and its mandatory bearer token (Task 14's
+  `main()` only binds the Unix socket listener) — when it is wired up, its
+  documented default port is `:49994` (Task 13's note on `TCPListener`).
+- Wiring `config.Load` into `cmd/vialrgbd`'s `main()` (Task 14's note) — it
+  currently uses hardcoded/env-var defaults instead.
 - Packaging/installation mechanics for the privilege model described in the
   design spec's Background section: the macOS LaunchAgent plist and the
-  Linux udev rule file. This plan implements `connectord`/`restd` as plain
-  binaries invoked directly (per Task 19's manual check) — it does not
-  create or install a `launchd`/`systemd`/udev unit. Doing so is a
-  packaging task, not a coding gap in Phase 1+2's architecture itself.
+  Linux udev rule file. This plan implements `vialrgbd` as a plain binary
+  invoked directly (per Task 17's manual check) — it does not create or
+  install a `launchd`/`systemd`/udev unit. Doing so is a packaging task, not
+  a coding gap in Phase 1+2's architecture itself.
+- Capabilities-cache invalidation on device reconnect (Task 11's note) — a
+  device's physical matrix doesn't change across a replug, so this isn't a
+  correctness gap, just an unexploited simplification.
 - Effects/animation (Phase 3), YAML status templates (Phase 4), per-client
   key allocation (Phase 5), server-owned timers (Phase 6), Windows support,
   TLS on the TCP listener.

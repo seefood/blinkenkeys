@@ -66,3 +66,11 @@ permissions no longer provide the access control. Plain HTTP + token is the acce
 threat model for now (LAN/trusted-network use); SSH port forwarding is the documented
 escape hatch if stronger transport security is ever needed, rather than adding TLS to
 `restd` itself.
+
+## Known limitations
+
+VialRGB Direct-mode colors (`g_direct_mode_colors`) live in RAM only and are lost on
+any firmware reset, USB replug, or brownout — the daemon has no way to read the
+device's current LED state back, only to (re)assert what it should be. This is why
+the design keeps a host-side cache of last-set colors and periodically re-asserts it
+(see the design spec).
