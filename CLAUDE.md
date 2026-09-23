@@ -11,29 +11,28 @@ architecture, and this file only summarizes the parts that affect how you work, 
 the full rationale. `README.md` has the 6-phase product roadmap; only Phases 1–2 are
 speced/in scope right now.
 
-The only code that currently exists is a **Python scaffold that is superseded and
-should not be extended**: `pyproject.toml` / `uv.lock` / `.python-version` /
-`src/vialrgb_notify/` are dead — a Python daemon PoC hit a dead end on macOS (see
-"Why not Python" in README.md: the Input Monitoring TCC grant requires a stable
-code-signing identity that an ad-hoc-signed `uv`-managed interpreter invocation
-doesn't have). The real implementation will be Go, following the package layout in
-the design spec (`cmd/connectord/`, `cmd/restd/`, `internal/...`), none of which
-exists yet.
-
-`set_key_color.py` is the one Python file that is **not** dead — it's a working,
+The only code that currently exists is `set_key_color.py` — a working,
 hardware-validated reference for the raw HID / VialRGB Direct protocol (device
 discovery via usage page `0xFF60`/usage `0x61`, `VIALRGB_SET_MODE`,
 `VIALRGB_DIRECT_FASTSET`). Treat it as the protocol ground truth when implementing
-the Go `internal/hid` package, not as code to build on top of.
+the Go `internal/hid` package, not as code to build on top of. The Python daemon
+scaffold that used to sit alongside it (`pyproject.toml` / `uv.lock` /
+`.python-version` / `src/vialrgb_notify/`) has been removed — that PoC hit a dead
+end on macOS (see "Why not Python" in README.md: the Input Monitoring TCC grant
+requires a stable code-signing identity that an ad-hoc-signed `uv`-managed
+interpreter invocation doesn't have) and is superseded by the Go rewrite. The real
+implementation will be Go, following the package layout in the design spec
+(`cmd/connectord/`, `cmd/restd/`, `internal/...`), none of which exists yet.
 
-## Commands (current Python scaffold only)
+## Commands
 
 ```
-uv sync --frozen                  # install hidapi dependency
-uv run python set_key_color.py    # protocol smoke test against real hardware
+uv run --with hidapi set_key_color.py    # protocol smoke test against real hardware
 ```
 
-Requires the `cxt_studio/12e4` board attached with the `personal/vialrgb-direct/001-enable`
+`set_key_color.py` has no `pyproject.toml` of its own anymore; `uv run --with` builds
+a throwaway env for its one dependency (`hidapi`) without needing one. Requires the
+`cxt_studio/12e4` board attached with the `personal/vialrgb-direct/001-enable`
 firmware branch flashed (see `../qmk_vial` and `../README.md` in the parent
 `CXT-studio` tree for how that firmware was built). On macOS this also requires the
 Input Monitoring TCC grant for whatever binary runs it — expect this to fail
