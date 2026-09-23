@@ -70,3 +70,92 @@ func sendReport(dev rawDevice, payload []byte) ([]byte, error) {
 	}
 	return resp, nil
 }
+
+// Device is an open connection to one Vial-capable raw-HID interface.
+type Device struct {
+	raw rawDevice
+}
+
+func newDevice(raw rawDevice) *Device { return &Device{raw: raw} }
+
+// Close releases the underlying HID handle.
+func (d *Device) Close() error { return d.raw.Close() }
+
+// GetKeyboardUID returns the firmware's compile-time VIAL_KEYBOARD_UID, the
+// most stable device-identity signal available (survives USB port changes).
+// Per quantum/vial.c's vial_get_keyboard_id handler, the reply layout is:
+// bytes 0-3 protocol version (unused here), bytes 4-11 the 8-byte UID.
+func (d *Device) GetKeyboardUID() ([8]byte, error) {
+	var uid [8]byte
+	resp, err := sendReport(d.raw, []byte{idVialPrefix, vialGetKeyboardID})
+	if err != nil {
+		return uid, err
+	}
+	copy(uid[:], resp[4:12])
+	return uid, nil
+}
+
+// GetNumberLEDs returns the device's total LED count, via VialRGB's
+// VIALRGB_GET_NUMBER_LEDS.
+func (d *Device) GetNumberLEDs() (uint16, error) {
+	resp, err := sendReport(d.raw, []byte{cmdViaLightingGetValue, valVialRGBGetNumberLEDs})
+	if err != nil {
+		return 0, err
+	}
+	return uint16(resp[2]) | uint16(resp[3])<<8, nil
+}
+
+// GetLEDInfo returns the matrix row/col position of the given LED index, via
+// VialRGB's VIALRGB_GET_LED_INFO.
+func (d *Device) GetLEDInfo(index uint16) (row, col uint8, err error) {
+	resp, err := sendReport(d.raw, []byte{
+		cmdViaLightingGetValue, valVialRGBGetLEDInfo,
+		byte(index), byte(index >> 8),
+	})
+	if err != nil {
+		return 0, 0, err
+	}
+	return resp[5], resp[6], nil
+}
+
+// SetDirectMode switches the device into VialRGB's Direct mode (host-
+// controlled, RAM-only colors), required before SetKeys has any effect.
+func (d *Device) SetDirectMode() error {
+	_, err := sendReport(d.raw, []byte{
+		cmdViaLightingSetValue, valVialRGBSetMode, effectDirect, 0x00,
+	})
+	return err
+}
+
+// KeyColor is one LED's target color, in QMK-native HSV (each 0-255).
+type KeyColor struct {
+	Index   uint16
+	H, S, V uint8
+}
+
+// SetKeys sets up to maxKeysPerReport (9) LEDs in one HID report, via
+// VialRGB's VIALRGB_DIRECT_FASTSET. keys must have contiguous, ascending
+// Index values — the wire format encodes only a start index and a count.
+// internal/dispatcher is responsible for chunking accordingly before
+// calling this.
+func (d *Device) SetKeys(keys []KeyColor) error {
+	if len(keys) == 0 {
+		return nil
+	}
+	if len(keys) > maxKeysPerReport {
+		return fmt.Errorf("hid: SetKeys got %d keys, max %d per report", len(keys), maxKeysPerReport)
+	}
+	start := keys[0].Index
+	payload := []byte{
+		cmdViaLightingSetValue, valVialRGBDirectFastSet,
+		byte(start), byte(start >> 8), byte(len(keys)),
+	}
+	for i, k := range keys {
+		if k.Index != start+uint16(i) {
+			return fmt.Errorf("hid: SetKeys: index %d not contiguous from %d", k.Index, start)
+		}
+		payload = append(payload, k.H, k.S, k.V)
+	}
+	_, err := sendReport(d.raw, payload)
+	return err
+}

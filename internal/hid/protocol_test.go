@@ -77,3 +77,99 @@ func TestSendReportWriteError(t *testing.T) {
 		t.Fatal("sendReport: want error when Write fails, got nil")
 	}
 }
+
+func TestGetKeyboardUID(t *testing.T) {
+	reply := make([]byte, ReportLen)
+	copy(reply[4:12], []byte{1, 2, 3, 4, 5, 6, 7, 8})
+	d := newDevice(&fakeDevice{replies: [][]byte{reply}})
+
+	uid, err := d.GetKeyboardUID()
+	if err != nil {
+		t.Fatalf("GetKeyboardUID: %v", err)
+	}
+	want := [8]byte{1, 2, 3, 4, 5, 6, 7, 8}
+	if uid != want {
+		t.Errorf("GetKeyboardUID = %v, want %v", uid, want)
+	}
+}
+
+func TestGetNumberLEDs(t *testing.T) {
+	reply := make([]byte, ReportLen)
+	reply[2], reply[3] = 0x2C, 0x01 // 300 little-endian
+	d := newDevice(&fakeDevice{replies: [][]byte{reply}})
+
+	n, err := d.GetNumberLEDs()
+	if err != nil {
+		t.Fatalf("GetNumberLEDs: %v", err)
+	}
+	if n != 300 {
+		t.Errorf("GetNumberLEDs = %d, want 300", n)
+	}
+}
+
+func TestGetLEDInfo(t *testing.T) {
+	reply := make([]byte, ReportLen)
+	reply[5], reply[6] = 2, 3 // row, col
+	d := newDevice(&fakeDevice{replies: [][]byte{reply}})
+
+	row, col, err := d.GetLEDInfo(7)
+	if err != nil {
+		t.Fatalf("GetLEDInfo: %v", err)
+	}
+	if row != 2 || col != 3 {
+		t.Errorf("GetLEDInfo = %d,%d, want 2,3", row, col)
+	}
+}
+
+func TestSetDirectMode(t *testing.T) {
+	fake := &fakeDevice{replies: [][]byte{make([]byte, ReportLen)}}
+	d := newDevice(fake)
+	if err := d.SetDirectMode(); err != nil {
+		t.Fatalf("SetDirectMode: %v", err)
+	}
+	want := make([]byte, 1+ReportLen)
+	want[1] = cmdViaLightingSetValue
+	want[2] = valVialRGBSetMode
+	want[3] = effectDirect
+	if !bytes.Equal(fake.writes[0], want) {
+		t.Errorf("wrote %x, want %x", fake.writes[0], want)
+	}
+}
+
+func TestSetKeys(t *testing.T) {
+	fake := &fakeDevice{replies: [][]byte{make([]byte, ReportLen)}}
+	d := newDevice(fake)
+
+	if err := d.SetKeys([]KeyColor{{Index: 5, H: 0, S: 255, V: 255}}); err != nil {
+		t.Fatalf("SetKeys: %v", err)
+	}
+	want := make([]byte, 1+ReportLen)
+	want[1] = cmdViaLightingSetValue
+	want[2] = valVialRGBDirectFastSet
+	want[3] = 5 // start index low
+	want[4] = 0 // start index high
+	want[5] = 1 // count
+	want[6], want[7], want[8] = 0, 255, 255
+	if !bytes.Equal(fake.writes[0], want) {
+		t.Errorf("wrote %x, want %x", fake.writes[0], want)
+	}
+}
+
+func TestSetKeysNonContiguous(t *testing.T) {
+	d := newDevice(&fakeDevice{})
+	err := d.SetKeys([]KeyColor{{Index: 5}, {Index: 7}})
+	if err == nil {
+		t.Fatal("SetKeys: want error for non-contiguous indices")
+	}
+}
+
+func TestSetKeysTooMany(t *testing.T) {
+	d := newDevice(&fakeDevice{})
+	keys := make([]KeyColor, maxKeysPerReport+1)
+	for i := range keys {
+		keys[i].Index = uint16(i)
+	}
+	if err := d.SetKeys(keys); err == nil {
+		t.Fatal("SetKeys: want error for more than maxKeysPerReport keys")
+	}
+}
