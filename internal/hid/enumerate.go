@@ -69,3 +69,44 @@ func Open(path string) (*Device, error) {
 	}
 	return newDevice(raw), nil
 }
+
+// Controller is the subset of Device's behavior internal/dispatcher depends
+// on, so tests can substitute a fake without opening real hardware.
+type Controller interface {
+	SetKeys(keys []KeyColor) error
+	GetNumberLEDs() (uint16, error)
+	GetLEDInfo(index uint16) (row, col uint8, err error)
+	Close() error
+}
+
+// Identity is a resolved identity for one attached device, gathered by
+// blinkenkeysd's startup enumeration (and re-gathered on each hotplug poll —
+// see internal/dispatcher's Registry) via the enumeration path plus a
+// GetKeyboardUID probe.
+type Identity struct {
+	Path      string
+	VendorID  uint16
+	ProductID uint16
+	UID       [8]byte
+	HasUID    bool
+}
+
+// BaseName computes d's pre-dedup identity key: Vial UID if available, else
+// VID/PID + platform path, else VID/PID alone. Exported so
+// internal/dispatcher's Registry (Task 6) can use it directly as the sole
+// naming/identity-matching primitive for its stateful Reconcile — dedup
+// suffixing (-0, -1, ...) and reconnect/"untethered" rewire matching both
+// live in Registry now, since both need state that persists across polls
+// (which name is already taken; which slot is untethered) rather than a
+// stateless one-shot pass over a single enumeration snapshot. Two Identity
+// values are considered the same device iff BaseName(a) == BaseName(b).
+func BaseName(d Identity) string {
+	switch {
+	case d.HasUID:
+		return fmt.Sprintf("uid-%x", d.UID)
+	case d.Path != "":
+		return fmt.Sprintf("%04x-%04x-%s", d.VendorID, d.ProductID, d.Path)
+	default:
+		return fmt.Sprintf("%04x-%04x", d.VendorID, d.ProductID)
+	}
+}
