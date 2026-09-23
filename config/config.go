@@ -47,7 +47,7 @@ type TCPListener struct {
 
 // Load reads and validates a config.yaml.
 func Load(path string) (*Config, error) {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) // #nosec G304 -- path is an operator-supplied config location, not untrusted network input
 	if err != nil {
 		return nil, fmt.Errorf("config: read %s: %w", path, err)
 	}

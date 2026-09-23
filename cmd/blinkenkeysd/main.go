@@ -68,8 +68,16 @@ func main() {
 		os.Exit(1)
 	}
 
+	srv := &http.Server{
+		Handler:           handler.Routes(),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+
 	logger.Info("blinkenkeysd listening", "socket", socketPath)
-	if err := http.Serve(listener, handler.Routes()); err != nil {
+	if err := srv.Serve(listener); err != nil {
 		logger.Error("http server exited", "err", err)
 		os.Exit(1)
 	}
