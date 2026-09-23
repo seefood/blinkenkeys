@@ -1,0 +1,227 @@
+# blinkenkeys: Phase 2.5 design — service installers
+
+Date: 2026-09-24
+
+## Scope
+
+This spec covers packaging `blinkenkeysd` (the single binary produced by Phases
+1+2, already hardware-validated — see
+`2026-09-21-blinkenkeys-phase1-2-design.md`) as a per-user background service on
+Linux and macOS: a udev rule (Linux only) for unprivileged HID access, a
+service-manager unit (`systemd --user` on Linux, a `launchd` LaunchAgent on
+macOS), and an idempotent install script for each platform.
+
+Both platforms are designed here. **Only the Linux installer is implemented in
+this pass** — the macOS side is specified to sketch/design level so the shape
+is settled, but the user will implement and test it later on their own
+laptop. This is not part of the original 6-phase product roadmap (`README.md`
+has no packaging/install phase); it's follow-on work the user asked for after
+Phases 1+2 landed.
+
+Not in scope: `config.Load` wiring into `main()` (still deferred, tracked
+separately — see the Phase 1+2 plan's "Explicitly deferred" section), an
+uninstall script, and any Windows service story.
+
+## Background / constraints
+
+- `blinkenkeysd` is a single Go binary (`bin/blinkenkeysd`) that blocks in the
+  foreground on `http.Serve` — it does not daemonize/fork itself, so it needs a
+  service manager to run it in the background and restart it on failure, not a
+  traditional SysV-style double-fork daemon.
+- It listens by default on a Unix socket at
+  `~/.local/state/blinkenkeys/api.sock` (`BLINKENKEYS_SOCKET` env var
+  override); no TCP listener is wired up by default.
+- Linux HID access: `/dev/hidraw*` is root-owned by default. The design spec's
+  stated primary mechanism is a udev rule granting the logged-in user access
+  (`TAG+="uaccess"`, the systemd-logind seat-based ACL grant), root is a
+  fallback only. The user already has a hand-edited
+  `/etc/udev/rules.d/99-vial.rules` (installed per Vial's own upstream
+  instructions, predating this project) that must not be overwritten or
+  clobbered by this installer.
+- A live investigation during this session (raw `hidraw` sysfs/report-descriptor
+  reads, `lsusb -v`, and a throwaway Go enumeration probe) established a
+  concrete fact this design relies on: the udev-visible `ATTRS{serial}` string
+  on a Vial-firmware device's raw-HID interface is a **firmware-build-time
+  fingerprint** in the form `vial:<hash>` — shared by every physical board
+  built from the same Vial keyboard-definition/config (confirmed: the user's
+  existing rule, written for a different physical board over 18 months ago,
+  already matches a newly-flashed second board because both share a firmware
+  build). This is distinct from `VIAL_KEYBOARD_UID` (the actual per-physical-
+  device identity `blinkenkeysd` itself queries live over the HID protocol for
+  its `Registry`/`BaseName` naming — see the Phase 1+2 spec). The udev layer
+  only needs to grant access to the interface, not distinguish devices, so
+  matching on the `vial:*` prefix generically (any Vial-firmware device) is
+  both correct and simpler than trying to scope by VID/PID or an exact hash.
+- macOS needs no udev analog at all: per the Phase 1+2 spec's corrected
+  finding, raw HID access to a vendor-defined usage page (`0xFF60`/`0x61`)
+  requires no Input Monitoring TCC grant. The macOS installer only needs to
+  place the binary and a LaunchAgent plist.
+- Per CLAUDE.md: macOS runs as a normal user process (LaunchAgent, never a
+  LaunchDaemon/root); Linux prefers the udev rule over running as root, with
+  root as a fallback-only path that isn't addressed by this installer (no
+  udev-rule-install-failed fallback flow is built here — if `sudo` fails the
+  script just errors).
+
+## Design
+
+### Component layout
+
+```
+packaging/
+  linux/
+    blinkenkeysd.service   # systemd --user unit template
+    99-blinkenkeys.rules   # udev rule template
+    install.sh             # Linux installer (implemented this pass)
+  macos/
+    com.seefood.blinkenkeysd.plist   # LaunchAgent template
+    install.sh                        # macOS installer (design only — not implemented this pass)
+docs/superpowers/manual-checks/
+  phase2-5-linux-install.md   # manual verification checklist, implemented this pass
+```
+
+Unit/rule/plist content ships as separate, reviewable template files rather
+than heredocs embedded in the install scripts, so the actual artifacts placed
+on a user's system are diffable in the repo and in `git log`.
+
+### Linux: udev rule
+
+`packaging/linux/99-blinkenkeys.rules`:
+
+```
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{serial}=="vial:*", MODE="0660", TAG+="uaccess"
+```
+
+Installed to `/etc/udev/rules.d/99-blinkenkeys.rules` — a name distinct from
+the user's existing `99-vial.rules`, so the installer only ever writes its own
+file and never touches the pre-existing one. `TAG+="uaccess"` matches the
+design spec's stated primary mechanism (systemd-logind seat ACL); this project
+doesn't add a `GROUP=`-based fallback since `uaccess` is already confirmed
+working on the dev machine.
+
+### Linux: systemd `--user` unit
+
+`packaging/linux/blinkenkeysd.service`:
+
+```ini
+[Unit]
+Description=blinkenkeysd — VialRGB keyboard-lighting daemon
+
+[Service]
+Type=simple
+ExecStart=__BLINKENKEYSD_BIN__
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target
+```
+
+`__BLINKENKEYSD_BIN__` is a literal placeholder token; `install.sh` substitutes
+it with the resolved binary path before writing the unit out, so the checked-
+in template never hardcodes a path. `WantedBy=default.target` + `systemctl
+--user enable --now` starts the daemon at login, not on a device-hotplug
+trigger — `blinkenkeysd`'s own hotplug polling (Phase 1+2) already handles
+devices attaching after the daemon is already running, so a udev-triggered
+unit would add complexity without adding capability.
+
+### Linux: binary install location
+
+`${XDG_BIN_HOME:-$HOME/.local/bin}/blinkenkeysd`. `XDG_BIN_HOME` isn't part of
+the official XDG Base Directory spec but is a common convention; `~/.local/bin`
+is the fallback when it's unset.
+
+### Linux: `install.sh`
+
+Single script, run as the normal user; only the individual lines that need
+root privilege shell out to `sudo` themselves (not one coarse `sudo` wrapper
+block) — the user types their password once and `sudo` caches it for the rest
+of the script's short runtime. Idempotent by default: each of the three
+artifacts (binary, systemd unit, udev rule) is compared against what's already
+installed and only rewritten if different or `--force` is passed.
+
+Steps:
+
+1. Resolve `BIN_DIR=${XDG_BIN_HOME:-$HOME/.local/bin}`, `mkdir -p` it.
+2. Require `bin/blinkenkeysd` already exists in the repo checkout (built via
+   `make build`); error out with a clear message pointing at `make build` if
+   missing, rather than duplicating build logic in two places.
+3. Copy `bin/blinkenkeysd` → `$BIN_DIR/blinkenkeysd`. Skip (no-op, no `sudo`
+   involved here — `$BIN_DIR` is user-owned) if `cmp -s` shows the destination
+   is already byte-identical, unless `--force`. Track whether it changed.
+4. Render `packaging/linux/blinkenkeysd.service` (substitute
+   `__BLINKENKEYSD_BIN__` → `$BIN_DIR/blinkenkeysd`) and write to
+   `${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/blinkenkeysd.service`. Skip
+   if identical unless `--force`. Track whether it changed.
+5. Compare `packaging/linux/99-blinkenkeys.rules` against
+   `/etc/udev/rules.d/99-blinkenkeys.rules`; if missing or different (or
+   `--force`), `sudo install -m 0644` it into place, then
+   `sudo udevadm control --reload-rules && sudo udevadm trigger`. Skip both
+   `sudo` calls entirely if the file's already correct.
+6. `systemctl --user daemon-reload` if the unit is new or changed.
+7. `systemctl --user enable --now blinkenkeysd.service`. If the service was
+   already running and step 3 or step 4 changed something,
+   `systemctl --user restart blinkenkeysd.service` explicitly afterward —
+   `enable --now` alone won't restart an already-running unit, so a rebuild-
+   and-reinstall without this would silently keep running the old binary.
+8. Print a short summary (`systemctl --user status blinkenkeysd.service
+   --no-pager`) and which of the three artifacts were installed vs. already
+   up to date vs. force-reinstalled.
+
+`--force`: reinstalls/overwrites all three artifacts unconditionally,
+regardless of whether they differ.
+
+### macOS (design sketch — implementation deferred to the user)
+
+No udev analog needed — no TCC grant gates this usage page (see Background),
+so there's no access-control artifact to install at all, only the binary and
+a LaunchAgent.
+
+`packaging/macos/com.seefood.blinkenkeysd.plist` (sketch — exact keys to be
+finalized when implemented):
+
+- `RunAtLoad = true`
+- `KeepAlive = { SuccessfulExit = false }` — launchd's rough equivalent of
+  `Restart=on-failure`: relaunch on a crash/nonzero exit, not on a clean exit.
+- `ProgramArguments` pointing at the resolved binary path, via the same
+  `__BLINKENKEYSD_BIN__`-placeholder substitution approach as the systemd
+  template.
+- Installed to `~/Library/LaunchAgents/com.seefood.blinkenkeysd.plist` (a
+  LaunchAgent, never a LaunchDaemon — CLAUDE.md hard constraint).
+
+`packaging/macos/install.sh` (sketch): same binary-location convention
+(`$XDG_BIN_HOME`/`~/.local/bin`), same idempotent/`--force` shape as the Linux
+script, but no `sudo` lines at all (nothing here needs root), and
+`launchctl bootstrap gui/$(id -u) <plist>` in place of
+`systemctl --user enable --now`.
+
+This section is intentionally a sketch, not literal final content — the user
+will write and test it directly on macOS hardware later.
+
+### Testing / verification
+
+`install.sh` performs real system mutations (installs a udev rule, changes
+systemd `--user` state) that aren't meaningfully unit-testable without
+mocking away the entire point of the script. Verification is:
+
+- **Automated:** `shellcheck` and `shfmt` `prek` hooks over `packaging/**/*.sh`
+  — the first shell scripts in this repo, so these are new hooks, not existing
+  ones being extended.
+- **Manual:** `docs/superpowers/manual-checks/phase2-5-linux-install.md`,
+  following the same pattern as the Phase 1+2 hardware round-trip doc. Covers:
+  fresh install from a clean state, idempotent re-run (confirm no-op, no
+  unnecessary `sudo` prompts), `--force` re-install, and a by-hand uninstall
+  note (no uninstall script is being built this pass, but the doc records what
+  to remove manually: the two artifact files, the systemd unit
+  disable/daemon-reload).
+
+## Explicitly deferred past this spec
+
+- macOS `install.sh` and plist implementation/testing (user will do this on
+  their own laptop).
+- An uninstall script.
+- A root-fallback path in `install.sh` for environments where the udev rule
+  can't be installed (e.g. no `sudo` access) — the design spec's warned-root-
+  fallback (`warnIfRootFallback`) is a `blinkenkeysd` runtime concern, not an
+  installer concern; the installer itself just errors if `sudo` fails.
+- `config.Load` wiring into `main()` — unrelated pre-existing deferred item,
+  not reopened here.
