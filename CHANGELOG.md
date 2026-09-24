@@ -119,3 +119,11 @@ model" section)
   fought over the LED instead of superseding each other — reproduced on an
   ordinary `claude "..."` session start, not just the spec's narrower
   "pre-declared, never-connected" case.
+- **2026-09-24**: Same class of fix, for the idle-timeout release path this
+  time: `Registry.SweepIdleClaims` now takes an `onRelease(device, index)`
+  callback, invoked once per freed claim after `r.mu` is released (calling it
+  under the lock would deadlock, since the callback writes back through the
+  dispatcher, which re-locks `r.mu`). `main.go` wires it to blank the key via
+  `effects.Engine.SetColor`, the same as the explicit-`DELETE` fix above —
+  `Registry` itself still has no dependency on `effects` and isn't meant to
+  gain one; the callback is main's, not the registry's.

@@ -55,7 +55,7 @@ func TestClaimOrGetReusesSameNameAndRefreshesClock(t *testing.T) {
 	}
 
 	// Idle timeout measured from the refreshed clock, not t0: not yet expired.
-	r.SweepIdleClaims(t0.Add(time.Hour+DefaultClaimIdleTimeout-time.Minute), DefaultClaimIdleTimeout)
+	r.SweepIdleClaims(t0.Add(time.Hour+DefaultClaimIdleTimeout-time.Minute), DefaultClaimIdleTimeout, nil)
 	if idx, err := r.ClaimOrGet("a", "esc", t0.Add(time.Hour)); err != nil || idx != first {
 		t.Errorf("claim survived sweep before timeout: idx=%d err=%v, want %d", idx, err, first)
 	}
@@ -109,7 +109,7 @@ func TestMarkDirectReleasesNameClaimAndIsPermanent(t *testing.T) {
 
 	// The directly-claimed index is excluded from the pool permanently, even
 	// after a sweep interval that leaves esc's own (still-fresh) claim alone.
-	r.SweepIdleClaims(now.Add(time.Minute), DefaultClaimIdleTimeout)
+	r.SweepIdleClaims(now.Add(time.Minute), DefaultClaimIdleTimeout, nil)
 	if _, err := r.ClaimOrGet("a", "shift", now); !errors.Is(err, ErrNoUnclaimedKeys) {
 		t.Errorf("pool err = %v, want ErrNoUnclaimedKeys (direct claim never released)", err)
 	}
@@ -149,7 +149,7 @@ func TestSweepIdleClaimsReleasesOnlyExpired(t *testing.T) {
 		t.Fatalf("claim tab: %v", err)
 	}
 
-	r.SweepIdleClaims(t0.Add(DefaultClaimIdleTimeout+time.Minute), DefaultClaimIdleTimeout)
+	r.SweepIdleClaims(t0.Add(DefaultClaimIdleTimeout+time.Minute), DefaultClaimIdleTimeout, nil)
 
 	if err := r.ReleaseClaim("a", "esc"); !errors.Is(err, ErrClaimNotFound) {
 		t.Errorf("esc still claimed after sweep: err = %v, want ErrClaimNotFound (idle expired)", err)
@@ -161,5 +161,33 @@ func TestSweepIdleClaimsReleasesOnlyExpired(t *testing.T) {
 	// esc's index is back in the pool.
 	if got, err := r.ClaimOrGet("a", "shift", t0); err != nil || got != oldIdx {
 		t.Errorf("ClaimOrGet(shift) = %d, %v; want swept idx %d back in the pool", got, err, oldIdx)
+	}
+}
+
+// TestSweepIdleClaimsReportsReleased verifies onRelease is invoked once per
+// expired claim with the (device, index) it freed, and not at all for a
+// still-fresh claim — the hook the daemon uses to blank an idle-swept key's
+// LED, since Registry itself has no way to write to one.
+func TestSweepIdleClaimsReportsReleased(t *testing.T) {
+	r := registryWithCaps(t, "a", threeRowPad())
+	t0 := time.Now()
+	oldIdx, err := r.ClaimOrGet("a", "esc", t0)
+	if err != nil {
+		t.Fatalf("claim esc: %v", err)
+	}
+	if _, err := r.ClaimOrGet("a", "tab", t0.Add(time.Hour)); err != nil {
+		t.Fatalf("claim tab: %v", err)
+	}
+
+	type freed struct {
+		device string
+		index  uint16
+	}
+	var released []freed
+	r.SweepIdleClaims(t0.Add(DefaultClaimIdleTimeout+time.Minute), DefaultClaimIdleTimeout,
+		func(device string, index uint16) { released = append(released, freed{device, index}) })
+
+	if want := (freed{"a", oldIdx}); len(released) != 1 || released[0] != want {
+		t.Errorf("released = %+v, want [%+v]", released, want)
 	}
 }

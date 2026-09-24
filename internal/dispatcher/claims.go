@@ -176,15 +176,32 @@ func (r *Registry) ReleaseClaim(device, name string) error {
 
 // SweepIdleClaims releases every named claim, across all devices, whose
 // last write is older than maxAge as of now. Direct claims never expire.
-func (r *Registry) SweepIdleClaims(now time.Time, maxAge time.Duration) {
+// onRelease, if non-nil, is called once per freed (device, index) pair after
+// r.mu is released — Registry has no way to blank the key's LED itself
+// (that needs effects.Engine, which depends on this package, not the other
+// way around), so the caller is expected to do that from the callback.
+// Calling it before unlocking would deadlock: the caller's typical use
+// (writing through the dispatcher) re-locks r.mu.
+func (r *Registry) SweepIdleClaims(now time.Time, maxAge time.Duration, onRelease func(device string, index uint16)) {
+	type freed struct {
+		device string
+		index  uint16
+	}
+	var released []freed
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	for _, s := range r.slots {
+	for device, s := range r.slots {
 		for name, c := range s.claims {
 			if now.Sub(c.lastWrite) > maxAge {
 				delete(s.claims, name)
 				delete(s.owners, c.index)
+				released = append(released, freed{device, c.index})
 			}
+		}
+	}
+	r.mu.Unlock()
+	if onRelease != nil {
+		for _, f := range released {
+			onRelease(f.device, f.index)
 		}
 	}
 }

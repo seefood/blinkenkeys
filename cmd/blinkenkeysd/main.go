@@ -18,9 +18,11 @@ import (
 
 	"github.com/seefood/blinkenkeys/config"
 	"github.com/seefood/blinkenkeys/internal/api"
+	"github.com/seefood/blinkenkeys/internal/color"
 	"github.com/seefood/blinkenkeys/internal/dispatcher"
 	"github.com/seefood/blinkenkeys/internal/effects"
 	"github.com/seefood/blinkenkeys/internal/hid"
+	"github.com/seefood/blinkenkeys/internal/keyaddr"
 )
 
 const (
@@ -95,10 +97,19 @@ func main() {
 
 	go pollForDevices(ctx, state, registry, cache, disp, logger)
 	go disp.RunPeriodicRedraw(ctx, dispatcher.RedrawInterval)
-	go disp.RunClaimSweep(ctx, dispatcher.ClaimSweepInterval, cfg.ClaimIdleTimeout())
 
 	engine := effects.NewEngine(disp, logger)
 	go engine.Run(ctx, effects.TickInterval)
+	// A key an idle sweep frees still has its last effect running on it
+	// (Registry can't stop that itself, see SweepIdleClaims's doc comment) —
+	// blank it the same way an explicit DELETE does.
+	go disp.RunClaimSweep(ctx, dispatcher.ClaimSweepInterval, cfg.ClaimIdleTimeout(),
+		func(device string, index uint16) {
+			target := effects.Target{Device: device, Addr: keyaddr.Address{Kind: keyaddr.LED, N: index}}
+			if err := engine.SetColor(target, color.HSV{}); err != nil {
+				logger.Warn("blank-on-idle-sweep failed", "device", device, "index", index, "err", err)
+			}
+		})
 	handler := api.NewHandler(disp, engine, lib, logger)
 
 	// socketPath comes from config.yaml's listeners.socket.path or the

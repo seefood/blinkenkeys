@@ -266,14 +266,16 @@ func (d *Dispatcher) ReleaseClaim(device, name string) error {
 }
 
 // RunClaimSweep releases every named claim whose last write is older than
-// maxAge, checking every interval, until ctx is canceled.
-func (d *Dispatcher) RunClaimSweep(ctx context.Context, interval, maxAge time.Duration) {
+// maxAge, checking every interval, until ctx is canceled. onRelease, if
+// non-nil, is passed through to Registry.SweepIdleClaims — see its doc
+// comment for why blanking the freed key's LED can't happen here.
+func (d *Dispatcher) RunClaimSweep(ctx context.Context, interval, maxAge time.Duration, onRelease func(device string, index uint16)) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ticker.C:
-			d.registry.SweepIdleClaims(time.Now(), maxAge)
+			d.registry.SweepIdleClaims(time.Now(), maxAge, onRelease)
 		case <-ctx.Done():
 			return
 		}
