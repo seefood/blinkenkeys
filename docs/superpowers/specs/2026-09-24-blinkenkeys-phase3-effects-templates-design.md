@@ -146,7 +146,7 @@ the routes below):
 
 | Condition | Status |
 |---|---|
-| Malformed body, color, address, effect params | 400 |
+| Malformed body, color, or address | 400 |
 | Device name/ordinal with no registry slot (never enumerated, not pre-declared) | 404 |
 | Key not on the device's matrix (capabilities known) | 404 |
 | Unknown effect or template state | 404 |
@@ -170,15 +170,17 @@ template state (claude/idle) ──> effect (timer5min) ──> stages ──> p
 **Primitives** are Go code in `internal/effects`, registered by name in a
 `map[string]Primitive`. Adding a primitive later (e.g. a sine-wave `breathe_sine`)
 means registering one more entry. No switch statements elsewhere change and no
-schema changes. A primitive declares its parameters (name, type, default) so the
-loader can validate YAML against it, and it is a pure function
-`(params, elapsedInStage) → HSV`.
+schema changes. A primitive declares its settings (name, type) so the loader can
+validate YAML against it, and it is a pure function
+`(settings, elapsedInStage) → HSV`. Every setting is required: there are no
+defaults, so an effect file states everything it does, and a missing setting
+fails loading (and `-check-config`).
 
-| Primitive | Params (defaults) | Behavior |
+| Primitive | Settings (all required) | Behavior |
 |---|---|---|
-| `breathe` | `color` (required), `frequency_hz` (1), `duty_cycle` (0.5) | Scales `color`'s V between 0 and its full V along a triangle wave. `duty_cycle` is the fraction of each period spent rising: 0.5 = symmetric triangle, 1.0 = rising sawtooth, 0.0 = falling sawtooth. H and S held. |
-| `alternate` | `color_a`, `color_b` (required), `frequency_hz` (1), `duty_cycle` (0.5) | Square wave: `color_a` for `duty_cycle` of each period, then `color_b`. At 1 Hz, 0.2 = 200 ms `color_a`, 800 ms `color_b`. |
-| `blink` | `color` (required), `frequency_hz` (1), `duty_cycle` (0.5) | Thin wrapper: `alternate` with `color_b` = black. |
+| `breathe` | `color`, `frequency_hz`, `duty_cycle` | Scales `color`'s V between 0 and its full V along a triangle wave. `duty_cycle` is the fraction of each period spent rising: 0.5 = symmetric triangle, 1.0 = rising sawtooth, 0.0 = falling sawtooth. H and S held. |
+| `alternate` | `color_a`, `color_b`, `frequency_hz`, `duty_cycle` | Square wave: `color_a` for `duty_cycle` of each period, then `color_b`. At 1 Hz, 0.2 = 200 ms `color_a`, 800 ms `color_b`. |
+| `blink` | `color`, `frequency_hz`, `duty_cycle` | Thin wrapper: `alternate` with `color_b` = black. |
 
 Validation: `frequency_hz` > 0; `0 ≤ duty_cycle ≤ 1`; colors must pass
 `color.Parse`.
@@ -191,23 +193,21 @@ Schema:
 
 ```yaml
 # effects/timer5min.yaml
-params:                 # optional; name -> default value
-  go: "#00ff00"
-  stop: "#ff0000"
 stages:
   - duration: 3m
-    color: $go
+    color: "#00ff00"
   - duration: 1m
     primitive: alternate
-    params: { color_a: $go, color_b: $stop, frequency_hz: 1, duty_cycle: 0.8 }
+    settings: { color_a: "#00ff00", color_b: "#ff0000", frequency_hz: 1, duty_cycle: 0.8 }
   - duration: 1m
     primitive: alternate
-    params: { color_a: $go, color_b: $stop, frequency_hz: 1, duty_cycle: 0.2 }
-final_state: $stop      # required on every effect that ends
+    settings: { color_a: "#00ff00", color_b: "#ff0000", frequency_hz: 1, duty_cycle: 0.2 }
+final_state: "#ff0000"  # required on every effect that ends
 ```
 
-- Each stage has exactly one of `color`, `primitive` (+ `params`), or `effect`
-  (+ optional `params`, a nested reference to another named effect).
+- Each stage has exactly one of `color`, `primitive` (+ `settings`), or `effect`
+  (a nested reference to another named effect). `settings` is only valid with
+  `primitive`.
 - `duration` is a Go duration string (`time.ParseDuration`: `1500ms`, `90s`, `3m`,
   `1h30m`), and must be > 0. It is required on every stage except the **last**.
   Omitting it there means "run until superseded", which is how an open-ended
@@ -222,15 +222,9 @@ final_state: $stop      # required on every effect that ends
   holds for the remainder.
 - After the last timed stage ends, the key is set to `final_state` and the effect
   ends.
-- **Parameters**: a scalar value that is exactly `$name` is replaced by that effect
-  parameter (`$go`, `$stop` above). The value comes from the caller's overrides,
-  else the effect's `params` default. Every declared parameter must have a
-  non-null default, so every effect is fully validated at load time; overrides
-  replace defaults per request. A `$name` not declared in `params` is a load-time
-  error. Overrides for undeclared params are a 400, as are override values that
-  fail validation. Override values are literal (not themselves substituted).
-  Substitution applies to colors, primitive params, nested-effect params, and
-  `duration`.
+- **No effect parameters in Phase 3.** Every value in an effect file is literal;
+  a variant (say, timer5min ending purple) is another effect file. Parameterized
+  effects with per-request overrides are deferred to a much later phase.
 - Stage timing is computed from elapsed wall-clock time since the effect started,
   not by counting frames, so it doesn't drift.
 
@@ -247,20 +241,18 @@ waiting:
   color: "#ffa500"
 ```
 
-Addressed as `<program>/<state>`, e.g. `claude/idle`. An entry may also pass
-`params:` overrides to its effect.
+Addressed as `<program>/<state>`, e.g. `claude/idle`.
 
 **Loading and validation** happen once at startup, from the config dir (§6).
 Missing `effects/` or `templates/` directories are fine. Any of the following is
-fatal: invalid file/effect/state names (`[a-z0-9_-]+`), unknown primitive, bad
-params, bad colors, unknown effect references, effect-reference cycles (detected
+fatal: invalid file/effect/state names (`[a-z0-9_-]+`), unknown primitive,
+missing/unknown/invalid primitive settings, bad colors, unknown effect references, effect-reference cycles (detected
 by DFS over nested-effect stages), a missing `final_state` on an effect that
 ends, unknown keys in any YAML mapping, or invalid `duration` values or
 placement. Only `*.yaml` files are read; other files in those directories are
 ignored. On a fatal error the daemon logs the file and reason and exits nonzero
-rather than running with a partial set. Each effect is compiled with its defaults
-at load time, so load-time validation is complete. A request with overrides
-recompiles, which is cheap.
+rather than running with a partial set. Every effect is compiled at load time, so
+load-time validation is complete and a request can never hit an invalid effect.
 
 `blinkenkeysd -check-config` runs exactly this loading and validation (plus
 `config.yaml`), prints `ok` or the error, and exits 0 or 1 without touching HID
@@ -407,12 +399,12 @@ all target keys the same way:
 ```
 PUT /devices/{name|ordinal}/keys/{pos}
   {"color": "#ff0000"}
-  {"effect": "timer5min", "params": {"stop": "purple"}}   # params optional
+  {"effect": "timer5min"}
   {"state": "claude/idle"}
 ```
 
-Exactly one of `color`, `effect`, `state` must be present (else 400). `params` is
-only valid alongside `effect`; overrides for a state belong in the template.
+Exactly one of `color`, `effect`, `state` must be present, and no other field
+(else 400).
 Success is 204. `GET /devices` and `GET /devices/{name|ordinal}` are otherwise
 unchanged, apart from the ordinal and untethered-capabilities behavior above.
 
@@ -445,8 +437,8 @@ examples/config/      effects/timer5min.yaml, effects/breathe_blue.yaml,
   `blink` = `alternate` with black; stage boundaries for `timer5min` at 0,
   179.9 s, 180 s, 240 s, 300 s (→ `final_state`); open-ended last stage never
   finishes; nested cut-off and hold; open-ended nested effect as the last stage.
-- **Loader**: every fatal case listed in §2 gets its own test; `$param`
-  substitution and override errors; `final_state` optional only when open-ended;
+- **Loader**: every fatal case listed in §2 gets its own test (including a
+  missing primitive setting); `final_state` optional only when open-ended;
   unknown-name errors list known names; the example files under
   `examples/config/` load cleanly.
 - **Engine**: driven by explicit `Tick(now)` calls against a fake dispatcher:
