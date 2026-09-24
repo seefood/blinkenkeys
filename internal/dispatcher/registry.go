@@ -2,6 +2,8 @@ package dispatcher
 
 import (
 	"fmt"
+	"sort"
+	"strconv"
 	"sync"
 	"time"
 
@@ -29,6 +31,9 @@ type slot struct {
 	state          slotState
 	ctrl           hid.Controller // set only while state == stateConnected
 	disconnectedAt time.Time      // set only while state == stateUntethered
+	caps           *Capabilities  // nil until first fetched; survives Untethered
+	optional       bool           // config-declared optional: never evicted
+	pending        []PendingWrite // writes awaiting caps, in arrival order
 }
 
 // PresentDevice pairs one currently-open device's resolved identity with its
@@ -50,6 +55,9 @@ type ReconcileResult struct {
 	// was deleted this cycle — the caller should also call Cache.Forget on
 	// each of these.
 	Evicted []string
+	// Added is every name whose slot was created this cycle (a device never
+	// seen before) — the caller logs a first-seen hint for each.
+	Added []string
 }
 
 // Registry is blinkenkeysd's persistent name-assignment and presence state: name
@@ -77,13 +85,133 @@ func (r *Registry) Get(name string) (hid.Controller, bool) {
 	return s.ctrl, true
 }
 
-// Summaries lists every known device, Connected or Untethered.
+// Summaries lists every known device, Connected or Untethered (including
+// declared, never-seen ones), sorted by name — list position is the
+// device's ordinal (see ResolveDevice).
 func (r *Registry) Summaries() []DeviceSummary {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	out := make([]DeviceSummary, 0, len(r.slots))
-	for name, s := range r.slots {
-		out = append(out, DeviceSummary{Name: name, Connected: s.state == stateConnected})
+	for _, name := range r.sortedNamesLocked() {
+		out = append(out, DeviceSummary{Name: name, Connected: r.slots[name].state == stateConnected})
+	}
+	return out
+}
+
+func (r *Registry) sortedNamesLocked() []string {
+	names := make([]string, 0, len(r.slots))
+	for name := range r.slots {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// Declare creates an Untethered, eviction-exempt slot named id with base
+// identity id — a config.yaml devices: entry with optional: true — so writes
+// to it succeed before the device is first seen, and Reconcile's existing
+// base-identity matching claims it when it enumerates. If id is already a
+// slot, Declare only marks it optional.
+func (r *Registry) Declare(id string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if s, ok := r.slots[id]; ok {
+		s.optional = true
+		return
+	}
+	r.slots[id] = &slot{base: id, state: stateUntethered, optional: true}
+}
+
+// Caps returns name's stored capabilities. known is false if they were
+// never fetched; exists is false if name has no slot.
+func (r *Registry) Caps(name string) (caps Capabilities, known, exists bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	s, ok := r.slots[name]
+	if !ok {
+		return Capabilities{}, false, false
+	}
+	if s.caps == nil {
+		return Capabilities{}, false, true
+	}
+	return *s.caps, true, true
+}
+
+// CapsOrPend atomically either returns name's capabilities or, if they
+// aren't known yet, records w as pending (replacing any earlier pending
+// write to the same literal address, which moves to the end). Atomicity is
+// what keeps a write from slipping between "caps unknown" and SetCaps.
+func (r *Registry) CapsOrPend(name string, w PendingWrite) (caps Capabilities, pended, exists bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	s, ok := r.slots[name]
+	if !ok {
+		return Capabilities{}, false, false
+	}
+	if s.caps != nil {
+		return *s.caps, false, true
+	}
+	for i, p := range s.pending {
+		if p.Addr == w.Addr {
+			s.pending = append(s.pending[:i], s.pending[i+1:]...)
+			break
+		}
+	}
+	s.pending = append(s.pending, w)
+	return Capabilities{}, true, true
+}
+
+// SetCaps stores caps on name's slot and, if any writes were pending, passes
+// them to apply in arrival order before clearing them. apply runs while the
+// registry lock is still held: any Write that resolves against the new caps
+// must first acquire this lock in CapsOrPend, so it always lands in the
+// cache after the pending writes it supersedes. apply may be nil.
+func (r *Registry) SetCaps(name string, caps Capabilities, apply func([]PendingWrite)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	s, ok := r.slots[name]
+	if !ok {
+		return
+	}
+	s.caps = &caps
+	if len(s.pending) > 0 && apply != nil {
+		apply(s.pending)
+	}
+	s.pending = nil
+}
+
+// ResolveDevice maps a {name} path segment to a slot name: either an exact
+// name, or a numeric ordinal — the rank among all slots sorted by name,
+// computed fresh on each call (so not stable across topology changes).
+func (r *Registry) ResolveDevice(ref string) (string, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.slots[ref]; ok {
+		return ref, true
+	}
+	n, err := strconv.ParseUint(ref, 10, 31)
+	if err != nil {
+		return "", false
+	}
+	names := r.sortedNamesLocked()
+	if int(n) >= len(names) {
+		return "", false
+	}
+	return names[n], true
+}
+
+// ConnectedWithoutCaps lists Connected slots whose capabilities were never
+// fetched (new, or whose earlier fetch failed), sorted by name — the poll
+// loop retries EnsureCapabilities for each on every cycle.
+func (r *Registry) ConnectedWithoutCaps() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out []string
+	for _, name := range r.sortedNamesLocked() {
+		s := r.slots[name]
+		if s.state == stateConnected && s.caps == nil {
+			out = append(out, name)
+		}
 	}
 	return out
 }
@@ -114,6 +242,7 @@ func (r *Registry) Reconcile(present []PresentDevice, now time.Time, maxAge time
 	nextSuffix := make(map[string]int)
 
 	var reconnected []string
+	var added []string
 	for _, pd := range present {
 		base := hid.BaseName(pd.Identity)
 
@@ -143,6 +272,7 @@ func (r *Registry) Reconcile(present []PresentDevice, now time.Time, maxAge time
 		usedNames[name] = true
 		claimed[name] = true
 		r.slots[name] = &slot{base: base, state: stateConnected, ctrl: pd.Ctrl}
+		added = append(added, name)
 	}
 
 	var evicted []string
@@ -156,7 +286,7 @@ func (r *Registry) Reconcile(present []PresentDevice, now time.Time, maxAge time
 			s.ctrl = nil
 			s.disconnectedAt = now
 		case stateUntethered:
-			if now.Sub(s.disconnectedAt) > maxAge {
+			if !s.optional && now.Sub(s.disconnectedAt) > maxAge {
 				delete(r.slots, name)
 				evicted = append(evicted, name)
 			}
@@ -170,7 +300,7 @@ func (r *Registry) Reconcile(present []PresentDevice, now time.Time, maxAge time
 		}
 	}
 
-	return ReconcileResult{Devices: devices, Reconnected: reconnected, Evicted: evicted}
+	return ReconcileResult{Devices: devices, Reconnected: reconnected, Evicted: evicted, Added: added}
 }
 
 // findUnclaimedByBase returns the name of an existing, not-yet-claimed-this-

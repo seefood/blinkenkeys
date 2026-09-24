@@ -8,6 +8,7 @@ package dispatcher
 import (
 	"errors"
 
+	"github.com/seefood/blinkenkeys/internal/color"
 	"github.com/seefood/blinkenkeys/internal/keyaddr"
 )
 
@@ -32,4 +33,11 @@ type LEDPosition = keyaddr.Position
 type Capabilities struct {
 	LEDCount  int           `json:"led_count"`
 	Positions []LEDPosition `json:"positions"`
+}
+
+// PendingWrite is a write to a device whose capabilities aren't known yet
+// (pre-declared, never connected), kept by literal address until they are.
+type PendingWrite struct {
+	Addr  keyaddr.Address
+	Color color.HSV
 }

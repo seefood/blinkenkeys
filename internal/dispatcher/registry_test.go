@@ -1,10 +1,13 @@
 package dispatcher
 
 import (
+	"reflect"
 	"testing"
 	"time"
 
+	"github.com/seefood/blinkenkeys/internal/color"
 	"github.com/seefood/blinkenkeys/internal/hid"
+	"github.com/seefood/blinkenkeys/internal/keyaddr"
 )
 
 // fakeController is reused by every test file in this package.
@@ -155,5 +158,144 @@ func TestRegistryGetAndSummaries(t *testing.T) {
 	summaries := r.Summaries()
 	if len(summaries) != 1 || summaries[0].Name != name || !summaries[0].Connected {
 		t.Errorf("Summaries = %+v", summaries)
+	}
+}
+
+func TestRegistryDeclareClaimedByDevice(t *testing.T) {
+	id := hid.Identity{HasUID: true, UID: [8]byte{1}}
+	name := hid.BaseName(id)
+	r := NewRegistry()
+	r.Declare(name)
+
+	if s := r.Summaries(); len(s) != 1 || s[0].Name != name || s[0].Connected {
+		t.Fatalf("Summaries after Declare = %+v, want one untethered %s", s, name)
+	}
+	res := r.Reconcile([]PresentDevice{{Identity: id, Ctrl: &fakeController{}}}, time.Now(), UntetheredMaxAge)
+	if !reflect.DeepEqual(res.Reconnected, []string{name}) {
+		t.Errorf("Reconnected = %v, want [%s]", res.Reconnected, name)
+	}
+	if len(res.Added) != 0 {
+		t.Errorf("Added = %v, want none (declared slot was claimed, not created)", res.Added)
+	}
+}
+
+func TestRegistryReconcileReportsAdded(t *testing.T) {
+	id := hid.Identity{HasUID: true, UID: [8]byte{2}}
+	r := NewRegistry()
+	res := r.Reconcile([]PresentDevice{{Identity: id, Ctrl: &fakeController{}}}, time.Now(), UntetheredMaxAge)
+	if !reflect.DeepEqual(res.Added, []string{hid.BaseName(id)}) {
+		t.Errorf("first Reconcile Added = %v", res.Added)
+	}
+	res = r.Reconcile([]PresentDevice{{Identity: id, Ctrl: &fakeController{}}}, time.Now(), UntetheredMaxAge)
+	if len(res.Added) != 0 {
+		t.Errorf("second Reconcile Added = %v, want none", res.Added)
+	}
+}
+
+func TestRegistryOptionalNeverEvicted(t *testing.T) {
+	r := NewRegistry()
+	r.Declare("uid-0100000000000000")
+	res := r.Reconcile(nil, time.Now().Add(48*time.Hour), UntetheredMaxAge)
+	if len(res.Evicted) != 0 {
+		t.Fatalf("Evicted = %v, want none", res.Evicted)
+	}
+	if _, _, exists := r.Caps("uid-0100000000000000"); !exists {
+		t.Error("declared slot gone after 48h")
+	}
+}
+
+func TestRegistryCapsOrPendAndSetCaps(t *testing.T) {
+	r := NewRegistry()
+	r.Declare("a")
+	a := keyaddr.Address{Kind: keyaddr.RowCol, Row: 1, Col: 1}
+	b := keyaddr.Address{Kind: keyaddr.LED, N: 0}
+
+	for _, w := range []PendingWrite{{a, color.HSV{H: 1}}, {b, color.HSV{H: 2}}, {a, color.HSV{H: 3}}} {
+		if _, pended, exists := r.CapsOrPend("a", w); !pended || !exists {
+			t.Fatalf("CapsOrPend(%v) pended=%v exists=%v", w, pended, exists)
+		}
+	}
+	if _, _, exists := r.CapsOrPend("missing", PendingWrite{Addr: a}); exists {
+		t.Error("CapsOrPend(missing) exists = true")
+	}
+
+	var got []PendingWrite
+	r.SetCaps("a", Capabilities{LEDCount: 2}, func(p []PendingWrite) { got = p })
+	want := []PendingWrite{{b, color.HSV{H: 2}}, {a, color.HSV{H: 3}}} // a moved to the end
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("apply got %+v, want %+v", got, want)
+	}
+
+	caps, pended, _ := r.CapsOrPend("a", PendingWrite{Addr: a})
+	if pended || caps.LEDCount != 2 {
+		t.Errorf("CapsOrPend after SetCaps = %+v pended=%v", caps, pended)
+	}
+	called := false
+	r.SetCaps("a", Capabilities{LEDCount: 2}, func([]PendingWrite) { called = true })
+	if called {
+		t.Error("apply called with no pending writes")
+	}
+}
+
+func TestRegistryCapsRetainedWhenUntethered(t *testing.T) {
+	id := hid.Identity{HasUID: true, UID: [8]byte{3}}
+	name := hid.BaseName(id)
+	r := NewRegistry()
+	r.Reconcile([]PresentDevice{{Identity: id, Ctrl: &fakeController{}}}, time.Now(), UntetheredMaxAge)
+	r.SetCaps(name, Capabilities{LEDCount: 4}, nil)
+	r.Reconcile(nil, time.Now(), UntetheredMaxAge)
+
+	caps, known, exists := r.Caps(name)
+	if !exists || !known || caps.LEDCount != 4 {
+		t.Errorf("Caps after disconnect = %+v known=%v exists=%v", caps, known, exists)
+	}
+}
+
+func TestRegistryResolveDevice(t *testing.T) {
+	r := NewRegistry()
+	for _, n := range []string{"b", "a", "c"} {
+		r.Declare(n)
+	}
+	tests := []struct {
+		ref    string
+		want   string
+		wantOK bool
+	}{
+		{"0", "a", true},
+		{"2", "c", true},
+		{"3", "", false},
+		{"b", "b", true},
+		{"zz", "", false},
+		{"99999999999999999999", "", false},
+		{"", "", false},
+	}
+	for _, tt := range tests {
+		got, ok := r.ResolveDevice(tt.ref)
+		if got != tt.want || ok != tt.wantOK {
+			t.Errorf("ResolveDevice(%q) = %q, %v; want %q, %v", tt.ref, got, ok, tt.want, tt.wantOK)
+		}
+	}
+}
+
+func TestRegistrySummariesSorted(t *testing.T) {
+	r := NewRegistry()
+	for _, n := range []string{"c", "a", "b"} {
+		r.Declare(n)
+	}
+	var names []string
+	for _, s := range r.Summaries() {
+		names = append(names, s.Name)
+	}
+	if !reflect.DeepEqual(names, []string{"a", "b", "c"}) {
+		t.Errorf("Summaries order = %v", names)
+	}
+}
+
+func TestRegistryConnectedWithoutCaps(t *testing.T) {
+	r := registryWithConnectedMulti(map[string]hid.Controller{"a": &fakeController{}, "b": &fakeController{}})
+	r.Declare("c") // untethered: excluded
+	r.SetCaps("a", Capabilities{LEDCount: 1}, nil)
+	if got := r.ConnectedWithoutCaps(); !reflect.DeepEqual(got, []string{"b"}) {
+		t.Errorf("ConnectedWithoutCaps = %v, want [b]", got)
 	}
 }
