@@ -65,17 +65,20 @@ buffer is copied onto whenever the canvas is available. Frames produced while th
 canvas is away are never delivered. When it returns it gets the current frame,
 not a replay.
 
-**Write path (`SetKey`), revised:**
+**Write path (`SetKey`, renamed `Write(device, address, hsv)`), revised:**
 
 1. Resolve the device (name or ordinal, see §4) to a registry slot. No slot —
    never enumerated since startup and not declared in `config.yaml` →
    `ErrDeviceNotFound` (→ 404), before any key-address resolution is attempted.
-   This is now the only way `SetKey` fails at the device level; the pending map
+   This is now the only way `Write` fails at the device level; the pending list
    in step 2 exists only for config-declared devices.
 2. Resolve the key address (see §3) against the slot's capabilities. If
    capabilities aren't known yet (a pre-declared device that has never connected,
-   §5), store the write in that device's **pending** map, keyed by the literal
-   address, and return success.
+   §5), store the write in that device's **pending** list on its registry slot
+   (a later write to the same literal address replaces the earlier one and moves
+   to the end), and return success. The check-capabilities-or-pend step is one
+   atomic registry operation, so a write can't slip between "caps unknown" and
+   "caps stored".
 3. `Cache.Update(device, key)` — **synchronously, unconditionally**, from the
    caller's goroutine. `Cache` is already mutex-guarded; it doesn't need to go
    through the dispatcher queue.
@@ -101,8 +104,10 @@ not a replay.
 - `ListDevices` and `GetCapabilities` stay synchronous request/reply jobs and can
   still return `ErrQueueFull` (→ 503).
 
-**Redraw, revised:** `Redraw(device)` enqueues flush jobs for every cached index.
-It no longer calls `SetKey`, so it never writes to the cache. Otherwise a snapshot
+**Redraw, revised:** `Redraw(device)` enqueues **one** redraw job, which the
+dispatcher expands at dispatch time into flushes of every currently cached index
+(one job per LED would overflow the 64-deep queue on any board with more than 64
+LEDs). It no longer calls `SetKey`, so it never writes to the cache. Otherwise a snapshot
 taken just before an effect frame would overwrite the newer frame in the cache.
 `RunPeriodicRedraw` (5s, `Connected` slots only) and `RedrawReconnected` are
 otherwise unchanged. Together they provide "delta on reconnect, full frame within
@@ -119,14 +124,22 @@ once per slot and stores the result on the slot. The stored result survives
 - For a slot that has never had capabilities (a pre-declared, never-connected
   device), `GET /devices/{name}` returns 503 ("capabilities not yet known").
 
-**Capabilities fetch and pending resolution on connect.** `Registry.Reconcile`
-additionally reports `Added` (brand-new slots) alongside the existing
-`Reconnected`. For every name in `Added ∪ Reconnected` whose slot lacks
-capabilities, the poll loop calls `Dispatcher.EnsureCapabilities(name)`. That call
-fetches and stores the capabilities, then resolves every pending entry into the
-cache (in arrival order, so the latest write per key wins), clears the pending
-map, and redraws. A pending entry that doesn't resolve (e.g. `5,9` on a 3×4 pad) is
+**Capabilities fetch and pending resolution on connect.** On every poll, for every
+name in `Registry.ConnectedWithoutCaps() ∪ Reconnected`, the poll loop calls
+`Dispatcher.EnsureCapabilities(name)`. (`ConnectedWithoutCaps` rather than a
+one-shot "newly added" list, so a device whose first capabilities fetch failed is
+retried on the next poll instead of being stuck without capabilities.) That call
+fetches and stores the capabilities if the slot lacks them, resolves every pending
+entry into the cache (in arrival order, so the latest write per key wins), clears
+the pending list, and redraws. Pending entries are applied to the cache while the
+registry lock that stored the capabilities is still held, so a newer direct write
+(which can only resolve after it observes the stored capabilities) always lands
+after them. A pending entry that doesn't resolve (e.g. `5,9` on a 3×4 pad) is
 dropped with a warn log naming the address.
+
+The first time a device slot is created by enumeration, the daemon logs its name
+with a copy-paste hint (`add "- id: <name>" with "optional: true" under devices:
+to pre-declare it`), so setting up §5 doesn't require reading `GET /devices`.
 
 **Effect on the error contract** (replaces the Phase 1+2 Error Handling table for
 the routes below):
@@ -182,35 +195,42 @@ params:                 # optional; name -> default value
   go: "#00ff00"
   stop: "#ff0000"
 stages:
-  - duration_ms: 180000
+  - duration: 3m
     color: $go
-  - duration_ms: 60000
+  - duration: 1m
     primitive: alternate
     params: { color_a: $go, color_b: $stop, frequency_hz: 1, duty_cycle: 0.8 }
-  - duration_ms: 60000
+  - duration: 1m
     primitive: alternate
     params: { color_a: $go, color_b: $stop, frequency_hz: 1, duty_cycle: 0.2 }
-final_state: $stop      # required on every effect
+final_state: $stop      # required on every effect that ends
 ```
 
 - Each stage has exactly one of `color`, `primitive` (+ `params`), or `effect`
   (+ optional `params`, a nested reference to another named effect).
-- `duration_ms` is required and > 0 on every stage except the **last**. Omitting it
-  there means "run until superseded", which is how an open-ended effect like
-  "breathe blue while working" is written. `final_state` is still required on an
-  open-ended effect, for uniformity.
-- A nested-effect stage without `duration_ms` takes the referenced effect's total
-  duration (not allowed if that effect is open-ended). If the stage is shorter than
-  the nested effect, the nested effect is cut off. If it's longer, the nested
-  effect's `final_state` holds for the remainder.
+- `duration` is a Go duration string (`time.ParseDuration`: `1500ms`, `90s`, `3m`,
+  `1h30m`), and must be > 0. It is required on every stage except the **last**.
+  Omitting it there means "run until superseded", which is how an open-ended
+  effect like "breathe blue while working" is written.
+- `final_state` is required on an effect that ends, and optional on an open-ended
+  one (it can never be reached; if given, it is still validated).
+- A nested-effect stage without `duration` takes the referenced effect's total
+  duration. If the referenced effect is open-ended, this is allowed only in the
+  **last** stage, and makes the outer effect open-ended too (e.g. "flash red 3×,
+  then breathe until superseded"). If the stage is shorter than the nested effect,
+  the nested effect is cut off. If it's longer, the nested effect's `final_state`
+  holds for the remainder.
 - After the last timed stage ends, the key is set to `final_state` and the effect
   ends.
-- **Parameters**: a scalar value that is exactly `$name` is replaced by that param.
-  The value comes from the caller's overrides, else the effect's `params` default.
-  A `$name` with no default and no override is an error: a load-time error if it
-  can't be satisfied from the file, a 400 at request time. Overrides for undeclared
-  params are a 400. Substitution applies to colors, primitive params, and
-  `duration_ms`.
+- **Parameters**: a scalar value that is exactly `$name` is replaced by that effect
+  parameter (`$go`, `$stop` above). The value comes from the caller's overrides,
+  else the effect's `params` default. Every declared parameter must have a
+  non-null default, so every effect is fully validated at load time; overrides
+  replace defaults per request. A `$name` not declared in `params` is a load-time
+  error. Overrides for undeclared params are a 400, as are override values that
+  fail validation. Override values are literal (not themselves substituted).
+  Substitution applies to colors, primitive params, nested-effect params, and
+  `duration`.
 - Stage timing is computed from elapsed wall-clock time since the effect started,
   not by counting frames, so it doesn't drift.
 
@@ -234,25 +254,36 @@ Addressed as `<program>/<state>`, e.g. `claude/idle`. An entry may also pass
 Missing `effects/` or `templates/` directories are fine. Any of the following is
 fatal: invalid file/effect/state names (`[a-z0-9_-]+`), unknown primitive, bad
 params, bad colors, unknown effect references, effect-reference cycles (detected
-by DFS over nested-effect stages), a missing `final_state`, or invalid
-`duration_ms` placement. On a fatal error the daemon logs the file and reason and
-exits nonzero rather than running with a partial set. Each effect is compiled
-with its defaults at load time, so load-time validation is complete. A request
-with overrides recompiles, which is cheap.
+by DFS over nested-effect stages), a missing `final_state` on an effect that
+ends, unknown keys in any YAML mapping, or invalid `duration` values or
+placement. Only `*.yaml` files are read; other files in those directories are
+ignored. On a fatal error the daemon logs the file and reason and exits nonzero
+rather than running with a partial set. Each effect is compiled with its defaults
+at load time, so load-time validation is complete. A request with overrides
+recompiles, which is cheap.
+
+`blinkenkeysd -check-config` runs exactly this loading and validation (plus
+`config.yaml`), prints `ok` or the error, and exits 0 or 1 without touching HID
+or the socket. Since there's no hot reload, this is how to validate an edit before
+restarting the service.
+
+404s for an unknown effect or template state list the known names in the error
+body (e.g. `unknown effect "timer5mn"; known: breathe_blue, timer5min`), standing
+in for the deferred listing routes.
 
 **Engine** (`internal/effects.Engine`): owns the map of running effects keyed by
 target `(device, canonical address)`. It is the only writer path the HTTP layer
 uses, so supersession is enforced in one place:
 
 - `SetColor(target, hsv)` cancels any running effect on the target, then calls
-  `Dispatcher.SetKey`.
+  `Dispatcher.Write(device, address, hsv)` (the revised `SetKey` of §1).
 - `Start(target, compiledEffect)` cancels any running effect on the target, then
   registers the new one with start time = now.
 - **The new command always wins.** A superseded effect is dropped without writing
   its `final_state`, because the new command's own write replaces it immediately.
   `final_state` is written only when an effect runs to its natural end.
 - **One tick goroutine at 5 fps (200 ms).** Each tick computes each running
-  effect's color at its elapsed time. It calls `SetKey` only if the color differs
+  effect's color at its elapsed time. It calls `Write` only if the color differs
   from the last one emitted for that target, so solid stages don't generate
   traffic. Finished effects write `final_state` and are removed. The tick
   function takes `now` as a parameter so tests drive it without a real clock.
@@ -261,9 +292,16 @@ uses, so supersession is enforced in one place:
   moment the keyboard returns.
 - Canonical address: when the device's capabilities are known, the API resolves
   any form to `led:N` before calling the engine, so `2,2`, `idx:10`, and `led:7`
-  naming the same key supersede each other. Known limitation: for a pre-declared,
-  never-connected device, capabilities are unknown, so supersession matches on the
-  literal address form until the device first connects.
+  naming the same key supersede each other. **Known limitation (accepted as
+  rare):** for a pre-declared, never-connected device, capabilities are unknown,
+  so the target is keyed by the literal address form. This persists for the life
+  of an effect started before first connect: after connect, a new command on the
+  same key via a different form (or via the same form, now canonicalized to
+  `led:N`) does not supersede it, and both run until the older one ends —
+  visibly fighting on the key for up to the older effect's remaining duration,
+  forever if it's open-ended. Workaround: re-send the command after the device
+  appears. A fix (re-keying running targets when capabilities first arrive) is
+  deferred.
 
 ### 3. Key addressing (`{pos}`)
 
@@ -275,6 +313,10 @@ Tried in this order:
 | `led:N` | Raw VialRGB LED index (firmware order — serpentine on the 12e4). Must be < LED count when known. |
 | `idx:N` | Row-major reading-order index: capabilities' positions sorted by (row, col), then numbered 0.. — top-left to bottom-right. |
 | anything else | A **key name**, to be registered or looked up (Phase 5). Phase 3 returns **501** with a message saying named keys aren't implemented yet. |
+
+LEDs with no matrix key (VialRGB reports row and col `0xFF` for them, e.g.
+underglow — `vialrgb.c`'s `VIALRGB_GET_LED_INFO`) never match an `R,C` address
+and are excluded from `idx:` numbering; only `led:N` reaches them.
 
 Parsing and resolution live in their own small package (`internal/keyaddr`), with
 no dependency on the dispatcher, so the API, engine, and pending-resolution code
@@ -332,10 +374,13 @@ devices:
   eviction**, since the laptop may stay away from that desk for a weekend or
   longer.
 - The id is the identity string, so the user runs the daemon once with the
-  keyboard attached, reads the name from `GET /devices`, and puts it in config.
+  keyboard attached, reads the name from its first-seen log line (§1) or
+  `GET /devices`, and puts it in config.
   VID/PID-tier ids work too, but inherit that tier's documented ambiguity.
-- Unknown keys in a `devices:` entry are a config error. The entry shape
-  (`id` + flags) leaves room for later fields such as aliases.
+- Each `id` must be non-empty, unique, and not all digits (an all-digit name
+  would be ambiguous with a device ordinal, §4). The entry shape (`id` + flags)
+  leaves room for later fields such as aliases. A `devices:` entry without
+  `optional: true` has no effect in Phase 3.
 
 ### 6. Config wiring
 
@@ -348,8 +393,11 @@ devices:
   `BLINKENKEYS_SOCKET` env > config > default, so current behavior is unchanged.
 - New `devices:` section (§5). Existing `naming`/`listeners` fields keep their
   meaning; TCP binding stays deferred.
+- `config.yaml` decoding becomes strict: an unknown key anywhere is a config error,
+  so typos fail loudly. No existing user config can break, because Phase 1+2
+  never wired `config.Load` into the daemon.
 - `main()` loads config, then effects and templates, before enumeration. Any error
-  is fatal at startup.
+  is fatal at startup. `-check-config` (§2) stops right after this step.
 
 ### 7. REST surface
 
@@ -381,8 +429,8 @@ curl --unix-socket ~/.local/state/blinkenkeys/api.sock \
 internal/keyaddr/     parse {pos} forms; resolve to LED index given positions
 internal/effects/     primitive registry, effect/template model, YAML loader + validation,
                       compiled timeline (pure), Engine (tick loop, supersession)
-internal/dispatcher/  frame-buffer SetKey, flush jobs, caps on slots, pending map,
-                      Declare/optional slots, Added in ReconcileResult
+internal/dispatcher/  frame-buffer Write, flush/redraw jobs, caps + pending list on
+                      slots, Declare/optional slots, ConnectedWithoutCaps
 internal/api/         body forms, ordinal + keyaddr resolution, engine as write path;
                       CapabilitiesCache removed
 config/               optional config.yaml, devices: section, config-dir resolution
@@ -396,26 +444,30 @@ examples/config/      effects/timer5min.yaml, effects/breathe_blue.yaml,
   known phases for duty 0/0.5/1; `alternate` switch points at 1 Hz / 0.2 and 0.8;
   `blink` = `alternate` with black; stage boundaries for `timer5min` at 0,
   179.9 s, 180 s, 240 s, 300 s (→ `final_state`); open-ended last stage never
-  finishes; nested cut-off and hold.
+  finishes; nested cut-off and hold; open-ended nested effect as the last stage.
 - **Loader**: every fatal case listed in §2 gets its own test; `$param`
-  substitution and override errors; the example files under `examples/config/`
-  load cleanly.
+  substitution and override errors; `final_state` optional only when open-ended;
+  unknown-name errors list known names; the example files under
+  `examples/config/` load cleanly.
 - **Engine**: driven by explicit `Tick(now)` calls against a fake dispatcher:
   supersession (color cancels effect; effect cancels effect), no `final_state` on
   supersession, `final_state` on natural end, unchanged frames not re-sent.
-- **keyaddr**: parse precedence, `idx:` ordering, out-of-range, name fallthrough.
-- **Dispatcher**: `SetKey` on an `Untethered` slot updates the cache and returns
+- **keyaddr**: parse precedence, `idx:` ordering, out-of-range, name fallthrough,
+  `0xFF` LEDs excluded.
+- **Dispatcher**: `Write` on an `Untethered` slot updates the cache and returns
   nil without touching the controller; unknown device → `ErrDeviceNotFound`; flush
   reads the latest cached value (enqueue flush, update the cache, dispatch → the
   newer color is sent); duplicate flushes collapse; a full queue drops without
-  error; `Redraw` doesn't mutate the cache; capabilities retained across
-  `Untethered`.
+  error; `Redraw` doesn't mutate the cache and is one queue job regardless of LED
+  count; capabilities retained across `Untethered`.
 - **Registry**: `Declare` creates a claimable untethered slot; the real device
   claims it and is reported `Reconnected`; optional slots are never evicted;
-  `Added` reported.
+  `ConnectedWithoutCaps` lists exactly the connected slots lacking capabilities.
 - **Pending**: writes to a declared, never-connected device resolve on
   `EnsureCapabilities`, latest write per key wins, unresolvable entries are
   dropped.
+- **Config**: strict decoding, `devices:` id validation, missing file → defaults,
+  config-dir and socket-path precedence; `-check-config` exit codes.
 - **API**: status table in §1 row by row; body exclusivity; ordinal resolution and
   out-of-range; 501 for names.
 - **Manual/gated** (`docs/superpowers/manual-checks/phase3-effects.md`): run
@@ -430,8 +482,9 @@ examples/config/      effects/timer5min.yaml, effects/breathe_blue.yaml,
   items 4 and 6 are marked as folded into Phase 3 (not renumbered, so "Phase 5 —
   per-client key allocation" keeps its number). Fixes the existing inconsistency
   where the README and the Phase 1+2 spec disagreed on which number effects had.
-- Phase 1+2 design spec: add a Revision-history entry pointing here for the
-  superseded error-table row and cache-on-success semantics.
+- `CHANGELOG.md`: add a Phase 3 entry pointing here for the superseded Phase 1+2
+  error-table row and cache-on-success semantics.
+- `docs/superpowers/manual-checks/phase3-effects.md` (the gated checks above).
 
 ## Explicitly deferred
 
