@@ -2,21 +2,19 @@ package dispatcher
 
 import (
 	"testing"
-
-	"github.com/seefood/blinkenkeys/internal/hid"
 )
 
-func setKeyJob(device string, index uint16) job {
-	return job{kind: opSetKey, device: device, key: hid.KeyColor{Index: index}, reply: make(chan jobResult, 1)}
+func flushJob(device string, index uint16) job {
+	return job{kind: opFlush, device: device, index: index}
 }
 
 func TestGroupForSendBatchesContiguous(t *testing.T) {
 	batch := []job{
-		setKeyJob("a", 0),
-		setKeyJob("a", 1),
-		setKeyJob("a", 2),  // contiguous, same device -> one group
-		setKeyJob("b", 5),  // different device -> its own group
-		setKeyJob("a", 10), // non-contiguous -> its own group
+		flushJob("a", 0),
+		flushJob("a", 1),
+		flushJob("a", 2),  // contiguous, same device -> one group
+		flushJob("b", 5),  // different device -> its own group
+		flushJob("a", 10), // non-contiguous -> its own group
 	}
 	groups := groupForSend(batch)
 	if len(groups) != 3 {
@@ -33,7 +31,7 @@ func TestGroupForSendBatchesContiguous(t *testing.T) {
 func TestGroupForSendCapsAtNine(t *testing.T) {
 	batch := make([]job, 12)
 	for i := range batch {
-		batch[i] = setKeyJob("a", uint16(i))
+		batch[i] = flushJob("a", uint16(i))
 	}
 	groups := groupForSend(batch)
 	if len(groups) != 2 || len(groups[0]) != 9 || len(groups[1]) != 3 {
@@ -41,14 +39,14 @@ func TestGroupForSendCapsAtNine(t *testing.T) {
 	}
 }
 
-func TestGroupForSendNonSetKeyAlwaysSingleton(t *testing.T) {
+func TestGroupForSendNonFlushAlwaysSingleton(t *testing.T) {
 	batch := []job{
 		{kind: opListDevices, reply: make(chan jobResult, 1)},
 		{kind: opListDevices, reply: make(chan jobResult, 1)},
 	}
 	groups := groupForSend(batch)
 	if len(groups) != 2 {
-		t.Fatalf("got %d groups, want 2 (non-SetKey ops never merge)", len(groups))
+		t.Fatalf("got %d groups, want 2 (non-flush ops never merge)", len(groups))
 	}
 }
 
@@ -58,4 +56,12 @@ func groupSizes(groups [][]job) []int {
 		sizes[i] = len(g)
 	}
 	return sizes
+}
+
+func TestDedupeFlushesKeepsFirstOccurrence(t *testing.T) {
+	batch := []job{flushJob("a", 0), flushJob("a", 1), flushJob("a", 0), flushJob("b", 0)}
+	got := dedupeFlushes(batch)
+	if len(got) != 3 || got[0].index != 0 || got[1].index != 1 || got[2].device != "b" {
+		t.Errorf("dedupeFlushes = %+v", got)
+	}
 }

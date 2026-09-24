@@ -7,12 +7,13 @@ import (
 	"github.com/seefood/blinkenkeys/internal/hid"
 )
 
-// Cache remembers the last color successfully written to each key of each
-// device, since VialRGB Direct-mode colors live in the keyboard's RAM only
-// and are lost on any reset/replug/brownout with no way to read them back
-// (design spec's "State persistence & refresh"). Not persisted to disk — on
-// a blinkenkeysd restart there's nothing more trustworthy to reload than an
-// empty cache.
+// Cache is the frame buffer: the desired color of each key of each device,
+// written unconditionally by Dispatcher.Write and delivered to hardware
+// best-effort. Since VialRGB Direct-mode colors live in the keyboard's RAM
+// only and are lost on any reset/replug/brownout with no way to read them
+// back (design spec's "State persistence & refresh"), Cache is not persisted
+// to disk either — on a blinkenkeysd restart there's nothing more
+// trustworthy to reload than an empty cache.
 type Cache struct {
 	mu       sync.Mutex
 	byDevice map[string]map[uint16]hid.KeyColor
@@ -53,6 +54,14 @@ func (c *Cache) Snapshot(device string) []hid.KeyColor {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Index < out[j].Index })
 	return out
+}
+
+// Get returns the cached color for one LED of device.
+func (c *Cache) Get(device string, index uint16) (hid.KeyColor, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	k, ok := c.byDevice[device][index]
+	return k, ok
 }
 
 // Forget deletes device's cache entry entirely — called when Registry's

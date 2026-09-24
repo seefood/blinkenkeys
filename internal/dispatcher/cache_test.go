@@ -40,3 +40,14 @@ func TestCacheForget(t *testing.T) {
 		t.Errorf("Snapshot after Forget = %v, want nil", got)
 	}
 }
+
+func TestCacheGet(t *testing.T) {
+	c := NewCache()
+	if _, ok := c.Get("a", 0); ok {
+		t.Error("Get on empty cache: ok = true")
+	}
+	c.Update("a", []hid.KeyColor{{Index: 2, H: 7}})
+	if k, ok := c.Get("a", 2); !ok || k.H != 7 {
+		t.Errorf("Get = %+v, %v", k, ok)
+	}
+}

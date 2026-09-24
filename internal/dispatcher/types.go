@@ -46,3 +46,11 @@ type PendingWrite struct {
 // connected and whose capabilities were never fetched (a pre-declared,
 // never-seen device) — internal/api maps this to a 503.
 var ErrCapsUnknown = errors.New("dispatcher: device capabilities not yet known")
+
+// ErrKeyNotFound is returned for a key address not on the device's matrix
+// (capabilities known) — internal/api maps this to a 404.
+var ErrKeyNotFound = errors.New("dispatcher: key not on device")
+
+// ErrNamedKeyUnsupported is returned for a key-name address, reserved for
+// Phase 5's named-key allocation — internal/api maps this to a 501.
+var ErrNamedKeyUnsupported = errors.New("dispatcher: named keys are not implemented yet")

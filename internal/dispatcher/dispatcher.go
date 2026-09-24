@@ -2,8 +2,10 @@ package dispatcher
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 
+	"github.com/seefood/blinkenkeys/internal/color"
 	"github.com/seefood/blinkenkeys/internal/hid"
 	"github.com/seefood/blinkenkeys/internal/keyaddr"
 )
@@ -11,7 +13,8 @@ import (
 type opKind int
 
 const (
-	opSetKey opKind = iota
+	opFlush  opKind = iota // deliver one cached LED; no reply
+	opRedraw               // expanded at dispatch time into flushes of the whole cache; no reply
 	opListDevices
 	opGetCapabilities
 )
@@ -19,8 +22,8 @@ const (
 type job struct {
 	kind   opKind
 	device string
-	key    hid.KeyColor // valid when kind == opSetKey
-	reply  chan jobResult
+	index  uint16         // valid when kind == opFlush
+	reply  chan jobResult // nil for opFlush and opRedraw
 }
 
 type jobResult struct {
@@ -58,20 +61,6 @@ func (d *Dispatcher) submit(ctx context.Context, j job) (jobResult, error) {
 	}
 }
 
-// SetKey submits one LED color change and blocks for its result.
-func (d *Dispatcher) SetKey(ctx context.Context, device string, index uint16, h, s, v uint8) error {
-	res, err := d.submit(ctx, job{
-		kind:   opSetKey,
-		device: device,
-		key:    hid.KeyColor{Index: index, H: h, S: s, V: v},
-		reply:  make(chan jobResult, 1),
-	})
-	if err != nil {
-		return err
-	}
-	return res.err
-}
-
 // ListDevices returns every currently registered device and whether it's
 // presently connected.
 func (d *Dispatcher) ListDevices(ctx context.Context) ([]DeviceSummary, error) {
@@ -102,38 +91,58 @@ func (d *Dispatcher) GetCapabilities(ctx context.Context, device string) (Capabi
 }
 
 // Run is the single dispatcher goroutine: it owns every hid.Controller in
-// registry exclusively. On each cycle it takes one job, then
-// non-blockingly drains any others already queued and batches same-device
-// contiguous SetKey jobs (see batch.go) before issuing them. It runs until
-// ctx is canceled.
+// registry exclusively. On each cycle it takes one job, non-blockingly
+// drains any others already queued, then processes them as a batch. It
+// runs until ctx is canceled.
 func (d *Dispatcher) Run(ctx context.Context) {
 	for {
-		var first job
 		select {
-		case first = <-d.queue:
+		case first := <-d.queue:
+			d.process(d.drainAfter(first))
 		case <-ctx.Done():
 			return
-		}
-		batch := []job{first}
-	drain:
-		for {
-			select {
-			case j := <-d.queue:
-				batch = append(batch, j)
-			default:
-				break drain
-			}
-		}
-		for _, group := range groupForSend(batch) {
-			d.dispatchGroup(group)
 		}
 	}
 }
 
+func (d *Dispatcher) drainAfter(first job) []job {
+	batch := []job{first}
+	for {
+		select {
+		case j := <-d.queue:
+			batch = append(batch, j)
+		default:
+			return batch
+		}
+	}
+}
+
+func (d *Dispatcher) process(batch []job) {
+	for _, group := range groupForSend(dedupeFlushes(d.expandRedraws(batch))) {
+		d.dispatchGroup(group)
+	}
+}
+
+// expandRedraws replaces each redraw job with flushes of every index
+// cached for its device at this moment.
+func (d *Dispatcher) expandRedraws(batch []job) []job {
+	out := make([]job, 0, len(batch))
+	for _, j := range batch {
+		if j.kind != opRedraw {
+			out = append(out, j)
+			continue
+		}
+		for _, k := range d.cache.Snapshot(j.device) {
+			out = append(out, job{kind: opFlush, device: j.device, index: k.Index})
+		}
+	}
+	return out
+}
+
 func (d *Dispatcher) dispatchGroup(group []job) {
 	switch group[0].kind {
-	case opSetKey:
-		d.dispatchSetKeys(group)
+	case opFlush:
+		d.dispatchFlush(group)
 	case opListDevices:
 		group[0].reply <- jobResult{list: d.registry.Summaries()}
 	case opGetCapabilities:
@@ -142,24 +151,97 @@ func (d *Dispatcher) dispatchGroup(group []job) {
 	}
 }
 
-func (d *Dispatcher) dispatchSetKeys(group []job) {
+// dispatchFlush sends one contiguous run of LEDs, reading each one's color
+// from the cache now — never a color captured at enqueue time, so a flush
+// can't deliver a stale frame. A non-Connected device is skipped silently;
+// a HID error is logged and otherwise ignored (the next poll marks the
+// device Untethered, and reconnect redraw catches it up).
+func (d *Dispatcher) dispatchFlush(group []job) {
 	device := group[0].device
 	ctrl, ok := d.registry.Get(device)
 	if !ok {
-		failAll(group, ErrDeviceNotFound)
 		return
 	}
-	keys := make([]hid.KeyColor, len(group))
-	for i, j := range group {
-		keys[i] = j.key
-	}
-	err := ctrl.SetKeys(keys)
-	if err == nil {
-		d.cache.Update(device, keys)
-	}
+	keys := make([]hid.KeyColor, 0, len(group))
 	for _, j := range group {
-		j.reply <- jobResult{err: err}
+		k, ok := d.cache.Get(device, j.index)
+		if !ok {
+			return // device's cache was forgotten (evicted) after this flush was queued
+		}
+		keys = append(keys, k)
 	}
+	if err := ctrl.SetKeys(keys); err != nil {
+		d.logger.Warn("hid write failed", "device", device, "err", err)
+	}
+}
+
+// tryEnqueue queues j without blocking; a full queue drops it (the cache
+// already holds the truth, and the next periodic redraw delivers it).
+func (d *Dispatcher) tryEnqueue(j job) {
+	select {
+	case d.queue <- j:
+	default:
+		d.logger.Debug("dispatcher queue full, dropping job", "device", j.device, "kind", int(j.kind))
+	}
+}
+
+// Write sets addr on device to c in the frame buffer and schedules delivery.
+// It never blocks and never waits on hardware: the cache is updated
+// synchronously (or, for a device whose capabilities aren't known yet, the
+// write is kept pending on its registry slot), and a colorless flush is
+// queued best-effort.
+func (d *Dispatcher) Write(device string, addr keyaddr.Address, c color.HSV) error {
+	if addr.Kind == keyaddr.Name {
+		if _, _, exists := d.registry.Caps(device); !exists {
+			return ErrDeviceNotFound
+		}
+		return ErrNamedKeyUnsupported
+	}
+	caps, pended, exists := d.registry.CapsOrPend(device, PendingWrite{Addr: addr, Color: c})
+	if !exists {
+		return ErrDeviceNotFound
+	}
+	if pended {
+		return nil
+	}
+	idx, ok := keyaddr.Resolve(addr, caps.LEDCount, caps.Positions)
+	if !ok {
+		return fmt.Errorf("%w: %s", ErrKeyNotFound, addr)
+	}
+	d.cache.Update(device, []hid.KeyColor{{Index: idx, H: c.H, S: c.S, V: c.V}})
+	d.tryEnqueue(job{kind: opFlush, device: device, index: idx})
+	return nil
+}
+
+// Canonical resolves addr to led:N when device's capabilities are known, so
+// every form naming one key maps to one effects-engine target. For a device
+// whose capabilities aren't known yet, addr is returned unchanged.
+func (d *Dispatcher) Canonical(device string, addr keyaddr.Address) (keyaddr.Address, error) {
+	caps, known, exists := d.registry.Caps(device)
+	switch {
+	case !exists:
+		return keyaddr.Address{}, ErrDeviceNotFound
+	case addr.Kind == keyaddr.Name:
+		return keyaddr.Address{}, ErrNamedKeyUnsupported
+	case !known:
+		return addr, nil
+	}
+	idx, ok := keyaddr.Resolve(addr, caps.LEDCount, caps.Positions)
+	if !ok {
+		return keyaddr.Address{}, fmt.Errorf("%w: %s", ErrKeyNotFound, addr)
+	}
+	return keyaddr.Address{Kind: keyaddr.LED, N: idx}, nil
+}
+
+// ResolveDevice maps a {name} path segment (name or ordinal) to a device name.
+func (d *Dispatcher) ResolveDevice(ref string) (string, bool) {
+	return d.registry.ResolveDevice(ref)
+}
+
+// SetKey is a temporary adapter that keeps internal/api's Phase 1+2 handler
+// compiling until it switches to the effects engine; deleted then.
+func (d *Dispatcher) SetKey(_ context.Context, device string, index uint16, h, s, v uint8) error {
+	return d.Write(device, keyaddr.Address{Kind: keyaddr.LED, N: index}, color.HSV{H: h, S: s, V: v})
 }
 
 // fetchCapabilities runs on the dispatcher goroutine. It re-checks for
@@ -210,11 +292,6 @@ func (d *Dispatcher) applyPending(device string, caps Capabilities, pending []Pe
 			continue
 		}
 		d.cache.Update(device, []hid.KeyColor{{Index: idx, H: w.Color.H, S: w.Color.S, V: w.Color.V}})
-	}
-}
-
-func failAll(group []job, err error) {
-	for _, j := range group {
-		j.reply <- jobResult{err: err}
+		d.tryEnqueue(job{kind: opFlush, device: device, index: idx})
 	}
 }

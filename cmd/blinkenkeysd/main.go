@@ -44,10 +44,12 @@ func main() {
 	state := newDeviceState()
 	// Initial enumeration, synchronous, so devices are known before HTTP
 	// traffic starts.
-	registry.Reconcile(state.refresh(logger), time.Now(), dispatcher.UntetheredMaxAge)
+	res := registry.Reconcile(state.refresh(logger), time.Now(), dispatcher.UntetheredMaxAge)
+	logAdded(logger, res.Added)
+	syncDevices(ctx, registry, disp, res.Reconnected, logger)
 
 	go pollForDevices(ctx, state, registry, cache, disp, logger)
-	go disp.RunPeriodicRedraw(ctx, dispatcher.RedrawInterval, logger)
+	go disp.RunPeriodicRedraw(ctx, dispatcher.RedrawInterval)
 
 	caps := api.NewCapabilitiesCache(disp)
 	handler := api.NewHandler(disp, caps)
@@ -203,11 +205,11 @@ func probeUID(path string, logger *slog.Logger) (uid [8]byte, hasUID bool) {
 
 // pollForDevices re-enumerates every enumeratePollInterval, reconciles
 // registry (rewiring reconnected devices, evicting stale-untethered ones per
-// Task 6), immediately redraws any device Reconcile reports as Reconnected —
-// the design spec's reconnect-triggered redraw, independent of (and faster
-// than) RunPeriodicRedraw's unconditional 5s sweep started separately in
-// main() — and forgets cache's entry for any device Reconcile reports as
-// Evicted, so a later device presenting that identity starts fresh.
+// Task 6), calls syncDevices to fetch capabilities for any device that needs
+// them (which also redraws reconnected devices from cache, faster than
+// RunPeriodicRedraw's unconditional 5s sweep started separately in main()),
+// and forgets cache's entry for any device Reconcile reports as Evicted, so
+// a later device presenting that identity starts fresh.
 func pollForDevices(ctx context.Context, state *deviceState, registry *dispatcher.Registry, cache *dispatcher.Cache, disp *dispatcher.Dispatcher, logger *slog.Logger) {
 	ticker := time.NewTicker(enumeratePollInterval)
 	defer ticker.Stop()
@@ -215,13 +217,40 @@ func pollForDevices(ctx context.Context, state *deviceState, registry *dispatche
 		select {
 		case <-ticker.C:
 			res := registry.Reconcile(state.refresh(logger), time.Now(), dispatcher.UntetheredMaxAge)
-			disp.RedrawReconnected(ctx, res.Reconnected, logger)
+			logAdded(logger, res.Added)
+			syncDevices(ctx, registry, disp, res.Reconnected, logger)
 			for _, name := range res.Evicted {
 				cache.Forget(name)
 			}
 		case <-ctx.Done():
 			return
 		}
+	}
+}
+
+// syncDevices ensures capabilities for every connected device lacking them
+// (newly seen, or whose earlier fetch failed — retried every poll) and for
+// every reconnected device; EnsureCapabilities also resolves pending writes
+// and redraws, which is the reconnect-triggered redraw.
+func syncDevices(ctx context.Context, registry *dispatcher.Registry, disp *dispatcher.Dispatcher, reconnected []string, logger *slog.Logger) {
+	seen := make(map[string]bool)
+	for _, name := range append(registry.ConnectedWithoutCaps(), reconnected...) {
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		if err := disp.EnsureCapabilities(ctx, name); err != nil {
+			logger.Warn("capabilities fetch failed", "device", name, "err", err)
+		}
+	}
+}
+
+// logAdded logs each first-seen device's name with the config.yaml snippet
+// that pre-declares it (spec §5), so users don't have to query GET /devices.
+func logAdded(logger *slog.Logger, names []string) {
+	for _, name := range names {
+		logger.Info("new device seen; to pre-declare it add under devices: in config.yaml",
+			"device", name, "snippet", "- id: "+name+"\n  optional: true")
 	}
 }
 
