@@ -16,6 +16,34 @@ and [Phase 3](docs/superpowers/specs/2026-09-24-blinkenkeys-phase3-effects-templ
 also implemented, specced inline in Phase 3's "Named-key model" section; see
 `CHANGELOG.md` for design revisions.
 
+## Installation
+
+Requires Go 1.27+, a C compiler (cgo), and on Linux the `libudev-dev`
+headers. Build the binary first:
+
+```bash
+make build   # produces bin/blinkenkeysd
+```
+
+**Linux:** `packaging/linux/install.sh` installs the binary, a udev rule
+granting the logged-in user unprivileged access to the device (no root
+needed after the one-time rule install), and a `systemd --user` service
+that starts `blinkenkeysd` at login. It's idempotent — safe to re-run
+after a rebuild; pass `--force` to reinstall unconditionally.
+
+```bash
+packaging/linux/install.sh
+```
+
+`packaging/linux/uninstall.sh` reverses it (binary, service, udev rule)
+without touching your `~/.config/blinkenkeys/` config or
+`~/.local/state/blinkenkeys/` runtime data. See
+[`docs/superpowers/manual-checks/phase2-5-linux-install.md`](docs/superpowers/manual-checks/phase2-5-linux-install.md)
+for the full install/uninstall verification checklist.
+
+**macOS:** designed but not implemented yet — see
+[the Phase 2.5 design spec](docs/superpowers/specs/2026-09-24-blinkenkeys-phase2-5-service-installers-design.md).
+
 ## Scratching my itch
 
 I got this keypad thinking I will use it with the encoders as jog wheels for video editing.
@@ -96,3 +124,7 @@ the design keeps a host-side cache of last-set colors and periodically re-assert
 (see the design spec). In theory this means you can unplug a device, connect it to
 another port, and the daemon will recognize it up to 24 hours later and set the display
 as it was, or as it has been updated since the disconnection.
+
+## License
+
+[GPL-3.0](LICENSE).
