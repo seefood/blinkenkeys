@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -21,7 +22,7 @@ import (
 // Dispatcher is the subset of *dispatcher.Dispatcher the handlers need.
 type Dispatcher interface {
 	ResolveDevice(ref string) (string, bool)
-	Canonical(device string, addr keyaddr.Address) (keyaddr.Address, error)
+	Canonical(ctx context.Context, device string, addr keyaddr.Address) (keyaddr.Address, error)
 	ListDevices(ctx context.Context) ([]dispatcher.DeviceSummary, error)
 	GetCapabilities(ctx context.Context, device string) (dispatcher.Capabilities, error)
 	ReleaseClaim(device, name string) error
@@ -43,14 +44,16 @@ type Library interface {
 
 // Handler holds blinkenkeysd's HTTP dependencies and builds its route table.
 type Handler struct {
-	disp Dispatcher
-	w    Writer
-	lib  Library
+	disp   Dispatcher
+	w      Writer
+	lib    Library
+	logger *slog.Logger
 }
 
-// NewHandler constructs a Handler.
-func NewHandler(disp Dispatcher, w Writer, lib Library) *Handler {
-	return &Handler{disp: disp, w: w, lib: lib}
+// NewHandler constructs a Handler. logger may be nil, in which case
+// best-effort warnings (e.g. a failed blank-on-release) are discarded.
+func NewHandler(disp Dispatcher, w Writer, lib Library, logger *slog.Logger) *Handler {
+	return &Handler{disp: disp, w: w, lib: lib, logger: logger}
 }
 
 // Routes builds blinkenkeysd's route table (Go 1.22+ ServeMux method+wildcard
@@ -86,7 +89,7 @@ func (h *Handler) writeKey(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	addr, err = h.disp.Canonical(device, addr)
+	addr, err = h.disp.Canonical(r.Context(), device, addr)
 	if err != nil {
 		writeError(w, statusFor(err), err)
 		return
@@ -120,6 +123,19 @@ func (h *Handler) releaseKey(w http.ResponseWriter, r *http.Request) {
 	if addr.Kind != keyaddr.Name {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("%w: release requires a key name, got %q", errBadRequest, addr))
 		return
+	}
+	// Cancel any running effect and blank the key before freeing the claim
+	// — otherwise an effect started under this name (e.g. timer5min) keeps
+	// animating the LED indefinitely, since nothing else supersedes it once
+	// the name is unclaimed. Must resolve the canonical address (and blank)
+	// while the claim still exists: resolving after release would
+	// auto-allocate a fresh claim under this same name instead.
+	if canonical, cerr := h.disp.Canonical(r.Context(), device, addr); cerr == nil {
+		if err := h.w.SetColor(effects.Target{Device: device, Addr: canonical}, color.HSV{}); err != nil && h.logger != nil {
+			h.logger.Warn("blank-on-release failed", "device", device, "key", addr.Name, "err", err)
+		}
+	} else if h.logger != nil {
+		h.logger.Warn("could not resolve key to blank on release", "device", device, "key", addr.Name, "err", cerr)
 	}
 	if err := h.disp.ReleaseClaim(device, addr.Name); err != nil {
 		writeError(w, statusFor(err), err)

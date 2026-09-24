@@ -17,7 +17,7 @@ func get(h *Handler, path string) *httptest.ResponseRecorder {
 
 func TestListDevices(t *testing.T) {
 	disp := &fakeDispatcher{listResult: []dispatcher.DeviceSummary{{Name: "uid-01", Connected: true}}}
-	rec := get(NewHandler(disp, &fakeWriter{}, &fakeLibrary{}), "/devices")
+	rec := get(NewHandler(disp, &fakeWriter{}, &fakeLibrary{}, nil), "/devices")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d", rec.Code)
 	}
@@ -29,7 +29,7 @@ func TestListDevices(t *testing.T) {
 
 func TestListDevicesQueueFull(t *testing.T) {
 	disp := &fakeDispatcher{listErr: dispatcher.ErrQueueFull}
-	if rec := get(NewHandler(disp, &fakeWriter{}, &fakeLibrary{}), "/devices"); rec.Code != http.StatusServiceUnavailable {
+	if rec := get(NewHandler(disp, &fakeWriter{}, &fakeLibrary{}, nil), "/devices"); rec.Code != http.StatusServiceUnavailable {
 		t.Errorf("status = %d, want 503", rec.Code)
 	}
 }
@@ -37,7 +37,7 @@ func TestListDevicesQueueFull(t *testing.T) {
 func TestGetCapabilitiesByOrdinal(t *testing.T) {
 	disp := knownPad()
 	disp.caps = dispatcher.Capabilities{LEDCount: 12}
-	rec := get(NewHandler(disp, &fakeWriter{}, &fakeLibrary{}), "/devices/0")
+	rec := get(NewHandler(disp, &fakeWriter{}, &fakeLibrary{}, nil), "/devices/0")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d", rec.Code)
 	}
@@ -59,7 +59,7 @@ func TestGetCapabilitiesStatuses(t *testing.T) {
 		{"queue full", &fakeDispatcher{devices: map[string]string{"0": "a"}, capsErr: dispatcher.ErrQueueFull}, "/devices/0", 503},
 	}
 	for _, tt := range tests {
-		if rec := get(NewHandler(tt.disp, &fakeWriter{}, &fakeLibrary{}), tt.path); rec.Code != tt.want {
+		if rec := get(NewHandler(tt.disp, &fakeWriter{}, &fakeLibrary{}, nil), tt.path); rec.Code != tt.want {
 			t.Errorf("%s: status = %d, want %d", tt.name, rec.Code, tt.want)
 		}
 	}

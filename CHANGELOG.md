@@ -103,3 +103,19 @@ model" section)
   `breathe_blue` to a new `breathe_orange.yaml` (same `breathe` primitive,
   `color: orange`); `breathe_blue.yaml` is left in place, now unreferenced, as
   a `breathe`-primitive example.
+- **2026-09-24**: Two more fixes from real-hardware hook debugging. (1)
+  `DELETE /devices/{name}/keys/{key-name}` now cancels any running effect and
+  blanks the key before freeing its claim — previously the claim was released
+  but nothing told the effects engine to stop, so an effect running under that
+  name (e.g. `timer5min`) kept animating an LED nothing owned anymore. (2)
+  Closed the Phase 3 spec's "Canonical address" known gap ahead of schedule:
+  `Dispatcher.Canonical` now blocks on the dispatcher to resolve capabilities
+  when they aren't known yet (same mechanism as `GetCapabilities`), instead of
+  keying the effects-engine target by the unresolved literal address form.
+  Without this, a session's `SessionStart` write (landing before the device's
+  first capability fetch) and its next `UserPromptSubmit` write (landing after)
+  produced two different `effects.Target` keys for the same physical key, so
+  `idle`'s `timer5min` and `working`'s `breathe_orange` ran concurrently and
+  fought over the LED instead of superseding each other — reproduced on an
+  ordinary `claude "..."` session start, not just the spec's narrower
+  "pre-declared, never-connected" case.

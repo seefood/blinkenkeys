@@ -237,20 +237,27 @@ func TestCanonical(t *testing.T) {
 	reg := withCaps(registryWithConnected("a", &fakeController{}), "a", 4)
 	reg.Declare("b")
 	d := New(reg, NewCache(), 8, discardLogger())
+	runDispatcher(t, d)
+	ctx := context.Background()
 
-	if got, err := d.Canonical("a", rc(0, 2)); err != nil || got != led(2) {
+	if got, err := d.Canonical(ctx, "a", rc(0, 2)); err != nil || got != led(2) {
 		t.Errorf("Canonical(a, 0,2) = %v, %v; want led:2", got, err)
 	}
-	if got, err := d.Canonical("b", rc(0, 2)); err != nil || got != rc(0, 2) {
-		t.Errorf("Canonical(b, 0,2) = %v, %v; want unchanged (caps unknown)", got, err)
+	// device "b" is declared but never connected: caps are unknown and can
+	// never become known, so Canonical must report that rather than silently
+	// returning an unresolved address — a caller keying an effects.Target off
+	// that unresolved form would collide with a later, resolved write to the
+	// same physical key once caps do arrive.
+	if _, err := d.Canonical(ctx, "b", rc(0, 2)); !errors.Is(err, ErrCapsUnknown) {
+		t.Errorf("Canonical(b, 0,2) = %v; want ErrCapsUnknown (declared, never connected)", err)
 	}
-	if _, err := d.Canonical("missing", rc(0, 0)); !errors.Is(err, ErrDeviceNotFound) {
+	if _, err := d.Canonical(ctx, "missing", rc(0, 0)); !errors.Is(err, ErrDeviceNotFound) {
 		t.Errorf("missing: err = %v", err)
 	}
-	if _, err := d.Canonical("a", led(9)); !errors.Is(err, ErrKeyNotFound) {
+	if _, err := d.Canonical(ctx, "a", led(9)); !errors.Is(err, ErrKeyNotFound) {
 		t.Errorf("off matrix: err = %v", err)
 	}
-	if _, err := d.Canonical("a", keyaddr.Address{Kind: keyaddr.Name, Name: "x"}); !errors.Is(err, ErrNoUnclaimedKeys) {
+	if _, err := d.Canonical(ctx, "a", keyaddr.Address{Kind: keyaddr.Name, Name: "x"}); !errors.Is(err, ErrNoUnclaimedKeys) {
 		t.Errorf("name with no eligible keys (row 0 only): err = %v, want ErrNoUnclaimedKeys", err)
 	}
 }
@@ -259,16 +266,16 @@ func TestCanonicalNamedKey(t *testing.T) {
 	reg := registryWithConnected("a", twoKeyPad())
 	d := New(reg, NewCache(), 8, discardLogger())
 	runDispatcher(t, d)
-	if _, err := d.GetCapabilities(context.Background(), "a"); err != nil {
-		t.Fatalf("GetCapabilities: %v", err)
-	}
 
+	// Caps deliberately not pre-fetched: Canonical must resolve them itself
+	// (blocking on the dispatcher, same as GetCapabilities) rather than
+	// returning the name unchanged.
 	esc := keyaddr.Address{Kind: keyaddr.Name, Name: "esc"}
-	got, err := d.Canonical("a", esc)
+	got, err := d.Canonical(context.Background(), "a", esc)
 	if err != nil || got != led(0) {
 		t.Fatalf("Canonical(a, esc) = %v, %v; want led:0 (first eligible key)", got, err)
 	}
-	if got2, err := d.Canonical("a", esc); err != nil || got2 != got {
+	if got2, err := d.Canonical(context.Background(), "a", esc); err != nil || got2 != got {
 		t.Errorf("Canonical(a, esc) again = %v, %v; want same claim %v", got2, err, got)
 	}
 }

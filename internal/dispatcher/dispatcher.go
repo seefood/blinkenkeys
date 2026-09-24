@@ -230,20 +230,20 @@ func (d *Dispatcher) resolve(device string, addr keyaddr.Address, caps Capabilit
 	return idx, nil
 }
 
-// Canonical resolves addr to led:N when device's capabilities are known, so
-// every form naming one key maps to one effects-engine target. A Name addr
-// claims (or reuses) a key from the device's named-key pool; any other form
-// marks its resolved index claimed-by-direct, releasing any name claim that
-// held it (see MarkDirect). For a device whose capabilities aren't known
-// yet, addr is returned unchanged (both kinds), and the pending-write path
-// (see Registry.SetCaps) handles it once caps arrive.
-func (d *Dispatcher) Canonical(device string, addr keyaddr.Address) (keyaddr.Address, error) {
-	caps, known, exists := d.registry.Caps(device)
-	if !exists {
-		return keyaddr.Address{}, ErrDeviceNotFound
-	}
-	if !known {
-		return addr, nil
+// Canonical resolves addr to led:N, so every form naming one key maps to one
+// effects-engine target. A Name addr claims (or reuses) a key from the
+// device's named-key pool; any other form marks its resolved index
+// claimed-by-direct, releasing any name claim that held it (see MarkDirect).
+// If device's capabilities aren't known yet, Canonical fetches them first
+// (blocking on the dispatcher, same as GetCapabilities) rather than
+// returning addr unresolved — a caller keying an effects.Target off an
+// unresolved address would get a different map key than a later write to
+// the same physical key made after caps became known, so two independently
+// ticking effects could end up racing to paint one LED.
+func (d *Dispatcher) Canonical(ctx context.Context, device string, addr keyaddr.Address) (keyaddr.Address, error) {
+	caps, err := d.GetCapabilities(ctx, device)
+	if err != nil {
+		return keyaddr.Address{}, err
 	}
 	if addr.Kind == keyaddr.Name {
 		idx, err := d.registry.ClaimOrGet(device, addr.Name, time.Now())

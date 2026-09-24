@@ -99,7 +99,7 @@ func main() {
 
 	engine := effects.NewEngine(disp, logger)
 	go engine.Run(ctx, effects.TickInterval)
-	handler := api.NewHandler(disp, engine, lib)
+	handler := api.NewHandler(disp, engine, lib, logger)
 
 	// socketPath comes from config.yaml's listeners.socket.path or the
 	// $HOME-derived default — gosec's taint analysis treats config files as

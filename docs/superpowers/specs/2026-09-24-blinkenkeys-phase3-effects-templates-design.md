@@ -282,18 +282,16 @@ uses, so supersession is enforced in one place:
 - Effects keep running while their device is `Untethered` or not yet seen. Their
   frames land in the cache or pending map, so a timer shows the correct stage the
   moment the keyboard returns.
-- Canonical address: when the device's capabilities are known, the API resolves
-  any form to `led:N` before calling the engine, so `2,2`, `idx:10`, and `led:7`
-  naming the same key supersede each other. **Known limitation (accepted as
-  rare):** for a pre-declared, never-connected device, capabilities are unknown,
-  so the target is keyed by the literal address form. This persists for the life
-  of an effect started before first connect: after connect, a new command on the
-  same key via a different form (or via the same form, now canonicalized to
-  `led:N`) does not supersede it, and both run until the older one ends —
-  visibly fighting on the key for up to the older effect's remaining duration,
-  forever if it's open-ended. Workaround: re-send the command after the device
-  appears. A fix (re-keying running targets when capabilities first arrive) is
-  deferred.
+- Canonical address: the API resolves any form to `led:N` before calling the
+  engine, so `2,2`, `idx:10`, and `led:7` naming the same key supersede each
+  other. If the device's capabilities aren't known yet, resolution blocks on
+  the dispatcher until they arrive (same mechanism as `GetCapabilities`)
+  rather than keying the target by the unresolved literal address form —
+  closing what was originally shipped as an accepted, rare limitation (two
+  independently-ticking effects fighting over one key when a command landed
+  before first connect). A device that can never answer (no registry slot, or
+  declared but never connected) still fails fast with `ErrDeviceNotFound` /
+  `ErrCapsUnknown` rather than blocking forever.
 
 ### 3. Key addressing (`{pos}`)
 

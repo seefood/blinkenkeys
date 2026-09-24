@@ -34,7 +34,7 @@ func (f *fakeDispatcher) ResolveDevice(ref string) (string, bool) {
 	return name, ok
 }
 
-func (f *fakeDispatcher) Canonical(_ string, a keyaddr.Address) (keyaddr.Address, error) {
+func (f *fakeDispatcher) Canonical(_ context.Context, _ string, a keyaddr.Address) (keyaddr.Address, error) {
 	if f.canonErr != nil {
 		return keyaddr.Address{}, f.canonErr
 	}
@@ -100,7 +100,7 @@ func put(t *testing.T, h *Handler, path, body string) *httptest.ResponseRecorder
 
 func TestPutColorViaOrdinal(t *testing.T) {
 	w := &fakeWriter{}
-	h := NewHandler(knownPad(), w, &fakeLibrary{})
+	h := NewHandler(knownPad(), w, &fakeLibrary{}, nil)
 	rec := put(t, h, "/devices/0/keys/2,2", `{"color":"#ff0000"}`)
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("status = %d; body %s", rec.Code, rec.Body)
@@ -114,7 +114,7 @@ func TestPutColorViaOrdinal(t *testing.T) {
 func TestPutEffect(t *testing.T) {
 	w := &fakeWriter{}
 	lib := &fakeLibrary{tl: &effects.Timeline{}}
-	h := NewHandler(knownPad(), w, lib)
+	h := NewHandler(knownPad(), w, lib, nil)
 	rec := put(t, h, "/devices/uid-01/keys/led:3", `{"effect":"timer5min"}`)
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("status = %d; body %s", rec.Code, rec.Body)
@@ -127,7 +127,7 @@ func TestPutEffect(t *testing.T) {
 func TestPutStateColorAndEffect(t *testing.T) {
 	orange := color.HSV{H: 28, S: 255, V: 255}
 	w := &fakeWriter{}
-	h := NewHandler(knownPad(), w, &fakeLibrary{action: effects.Action{Color: &orange}})
+	h := NewHandler(knownPad(), w, &fakeLibrary{action: effects.Action{Color: &orange}}, nil)
 	if rec := put(t, h, "/devices/0/keys/0,0", `{"state":"claude/waiting"}`); rec.Code != http.StatusNoContent {
 		t.Fatalf("color state: status = %d", rec.Code)
 	}
@@ -137,7 +137,7 @@ func TestPutStateColorAndEffect(t *testing.T) {
 
 	tl := &effects.Timeline{}
 	w = &fakeWriter{}
-	h = NewHandler(knownPad(), w, &fakeLibrary{action: effects.Action{Timeline: tl}})
+	h = NewHandler(knownPad(), w, &fakeLibrary{action: effects.Action{Timeline: tl}}, nil)
 	if rec := put(t, h, "/devices/0/keys/0,0", `{"state":"claude/idle"}`); rec.Code != http.StatusNoContent {
 		t.Fatalf("effect state: status = %d", rec.Code)
 	}
@@ -172,7 +172,7 @@ func TestPutStatusTable(t *testing.T) {
 		{"write failure", knownPad(), &fakeLibrary{}, errors.New("boom"), "/devices/0/keys/0,0", `{"color":"red"}`, 503},
 	}
 	for _, tt := range tests {
-		h := NewHandler(tt.disp, &fakeWriter{err: tt.werr}, tt.lib)
+		h := NewHandler(tt.disp, &fakeWriter{err: tt.werr}, tt.lib, nil)
 		if rec := put(t, h, tt.path, tt.body); rec.Code != tt.want {
 			t.Errorf("%s: status = %d, want %d; body %s", tt.name, rec.Code, tt.want, rec.Body)
 		}
@@ -188,12 +188,33 @@ func del(t *testing.T, h *Handler, path string) *httptest.ResponseRecorder {
 
 func TestDeleteReleasesNamedKey(t *testing.T) {
 	disp := knownPad()
-	h := NewHandler(disp, &fakeWriter{}, &fakeLibrary{})
+	h := NewHandler(disp, &fakeWriter{}, &fakeLibrary{}, nil)
 	rec := del(t, h, "/devices/0/keys/esc")
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("status = %d; body %s", rec.Code, rec.Body)
 	}
 	if len(disp.released) != 1 || disp.released[0] != "uid-01/esc" {
+		t.Errorf("ReleaseClaim calls = %v", disp.released)
+	}
+}
+
+// TestDeleteBlanksKeyBeforeReleasing verifies a release cancels any running
+// effect and blanks the key (via the same SetColor path that cancels an
+// effects.Engine entry) before the claim is freed — otherwise a still-running
+// effect (e.g. timer5min) keeps animating an LED nothing owns anymore.
+func TestDeleteBlanksKeyBeforeReleasing(t *testing.T) {
+	disp := knownPad()
+	w := &fakeWriter{}
+	h := NewHandler(disp, w, &fakeLibrary{}, nil)
+	rec := del(t, h, "/devices/0/keys/esc")
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d; body %s", rec.Code, rec.Body)
+	}
+	wantTarget := effects.Target{Device: "uid-01", Addr: keyaddr.Address{Kind: keyaddr.Name, Name: "esc"}}
+	if len(w.colors) != 1 || w.colors[0] != wantTarget || w.gotHSV[0] != (color.HSV{}) {
+		t.Errorf("SetColor calls = %+v %+v", w.colors, w.gotHSV)
+	}
+	if len(disp.released) != 1 {
 		t.Errorf("ReleaseClaim calls = %v", disp.released)
 	}
 }
@@ -211,7 +232,7 @@ func TestDeleteStatusTable(t *testing.T) {
 		{"no claim under that name", &fakeDispatcher{devices: map[string]string{"0": "a"}, releaseErr: dispatcher.ErrClaimNotFound}, "/devices/0/keys/esc", 404},
 	}
 	for _, tt := range tests {
-		h := NewHandler(tt.disp, &fakeWriter{}, &fakeLibrary{})
+		h := NewHandler(tt.disp, &fakeWriter{}, &fakeLibrary{}, nil)
 		if rec := del(t, h, tt.path); rec.Code != tt.want {
 			t.Errorf("%s: status = %d, want %d; body %s", tt.name, rec.Code, tt.want, rec.Body)
 		}
@@ -220,7 +241,7 @@ func TestDeleteStatusTable(t *testing.T) {
 
 func TestUnknownEffectBodyListsKnown(t *testing.T) {
 	lib := &fakeLibrary{effErr: fmt.Errorf("%w %q; known: breathe_blue, timer5min", effects.ErrUnknownEffect, "x")}
-	rec := put(t, NewHandler(knownPad(), &fakeWriter{}, lib), "/devices/0/keys/0,0", `{"effect":"x"}`)
+	rec := put(t, NewHandler(knownPad(), &fakeWriter{}, lib, nil), "/devices/0/keys/0,0", `{"effect":"x"}`)
 	if !strings.Contains(rec.Body.String(), "timer5min") {
 		t.Errorf("body %s does not list known effects", rec.Body)
 	}
