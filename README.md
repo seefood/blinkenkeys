@@ -98,6 +98,11 @@ I'm planning to add templates to suport all sorts of use cases, please add your 
    lives in the effect/template schema and what's allowed to trigger it
    (security-sensitive: this is arbitrary command execution, so it needs a
    real opt-in, not just a config field).
+8. **Friendly CLI** — future work, not yet designed. A small wrapper that
+   encapsulates pane detection (see item 5's WezTerm/iTerm correlation) in
+   user-facing terms instead of raw `R,C` math, reads the bearer token from
+   the daemon's own config so the user doesn't have to, and calls `curl`
+   against the socket/TCP listener in the background on the user's behalf.
 
 Windows support is an open question intentionally left for a future community PR —
 not being built or tested here.
