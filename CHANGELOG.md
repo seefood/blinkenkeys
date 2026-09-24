@@ -127,3 +127,11 @@ model" section)
   `effects.Engine.SetColor`, the same as the explicit-`DELETE` fix above —
   `Registry` itself still has no dependency on `effects` and isn't meant to
   gain one; the callback is main's, not the registry's.
+
+## Phase 2.5 design (`docs/superpowers/specs/2026-09-24-blinkenkeys-phase2-5-service-installers-design.md`)
+
+- **2026-09-24**: Added a Linux `uninstall.sh` to the spec (originally listed
+  under "Explicitly deferred past this spec") and implemented it alongside
+  `install.sh` — reverses each of the three artifacts `install.sh` installs
+  (binary, systemd unit, udev rule), idempotent, and leaves user
+  config/state directories untouched.
