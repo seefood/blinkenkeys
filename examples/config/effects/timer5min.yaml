@@ -1,0 +1,13 @@
+# Claude Code prompt-cache timer: green for 3 minutes, then increasingly
+# urgent green/red alternation, ending solid red when the 5-minute cache
+# TTL has expired.
+stages:
+  - duration: 3m
+    color: "#00ff00"
+  - duration: 1m
+    primitive: alternate
+    settings: { color_a: "#00ff00", color_b: "#ff0000", frequency_hz: 1, duty_cycle: 0.8 }
+  - duration: 1m
+    primitive: alternate
+    settings: { color_a: "#00ff00", color_b: "#ff0000", frequency_hz: 1, duty_cycle: 0.2 }
+final_state: "#ff0000"
