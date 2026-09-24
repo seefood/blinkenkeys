@@ -74,10 +74,13 @@ design while implementing.)
   all in one binary — don't reintroduce a second process or an IPC layer between
   them.
 - **All access to the open HID handles goes through one dispatcher goroutine** —
-  the "traffic cop" that does per-device batching of `SetKey` calls into `SetKeys`
-  (VialRGB's packet ceiling is 9 LEDs per report) and owns the last-known-good color
-  cache used for reconnect/periodic redraw (colors live in the keyboard's RAM only
-  and don't survive a reset). Don't let other goroutines call a `hid.Controller`
+  the "traffic cop" that batches flushes into `SetKeys` calls (VialRGB's packet
+  ceiling is 9 LEDs per report). The color cache is a frame buffer: `Dispatcher.Write`
+  updates it synchronously and queues a colorless flush that reads the cache at
+  dispatch time; periodic/reconnect redraw replays it (colors live in the
+  keyboard's RAM only and don't survive a reset). HTTP writes go through
+  `effects.Engine`, never straight to the dispatcher, so effect supersession is
+  enforced in one place. Don't let other goroutines call a `hid.Controller`
   directly.
 - **Never call `syscall.Setuid`/`Setgid` on a running process to drop privilege** —
   it's broken across Go's OS threads (`golang/go#1435`). There's no spawned child to

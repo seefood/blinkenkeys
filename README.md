@@ -9,11 +9,11 @@ first place — but designed to generalize to any VialRGB-capable device.
 
 ## Status
 
-Language/implementation: **Go**. Active spec:
-[`docs/superpowers/specs/2026-09-21-blinkenkeys-phase1-2-design.md`](docs/superpowers/specs/2026-09-21-blinkenkeys-phase1-2-design.md)
-covers Phases 1–2 (POC → MVP). Phases 3–6 below are roadmap/future-proofing only —
-not yet speced in detail, but the concurrency/dispatcher design was made now
-specifically so it doesn't require rewrites later.
+Language/implementation: **Go**. Specs:
+[Phases 1–2](docs/superpowers/specs/2026-09-21-blinkenkeys-phase1-2-design.md) (POC → MVP)
+and [Phase 3](docs/superpowers/specs/2026-09-24-blinkenkeys-phase3-effects-templates-design.md)
+(effects, templates, server-owned timers). Phase 5 is roadmap only; see
+`CHANGELOG.md` for design revisions.
 
 ## Scratching my itch
 
@@ -40,20 +40,21 @@ I'm planning to add templates to suport all sorts of use cases, please add your 
    devices (up to several at once), their matrix size/LED capabilities, and
    config-assigned stable names (so USB renumbering / port changes don't break
    clients). Duplicate boards get auto-suffixed names (`-0`, `-1`, ...).
-3. **Abstraction templates** — named semantic states (mic-mute, build-status, DND, ...)
-   mapped to phase 3 effects/colors via YAML config dropped in
-   `~/.config/blinkenkeys/templates/`.
-4. **Effects** — blink, breathe, two-color alternation, radius-based "explosion"
-   propagation from a key, etc. Client requests an effect; `blinkenkeysd` owns the
-   animation timing loop.
+3. **Effects, abstraction templates, server-owned timers** — Go-coded animation
+   primitives (breathe, blink, two-color alternation) composed into named
+   multi-stage effects in `~/.config/blinkenkeys/effects/*.yaml`, and templates in
+   `~/.config/blinkenkeys/templates/*.yaml` mapping semantic states
+   (`claude/idle`, mic-mute, build-status, ...) to colors or effects. A
+   multi-stage effect with timed stages *is* a server-owned timer: a Claude Code
+   hook says "went idle" once, and the key animates toward "cache about to
+   expire" over the next 5 minutes entirely server-side. See
+   `examples/config/`.
+4. *(Folded into Phase 3.)* Radius-based "explosion" / multi-key effects are on
+   hold.
 5. **Per-client key allocation** — a subscriber (e.g. a coding agent instance) is
    allocated a key and directs its own state to it. Open question, unsolved: how to
    correlate a subscriber to a specific terminal tab (iTerm/WezTerm) automatically.
-6. **Server-owned timers** — client fires a single "entered state X" event;
-   `blinkenkeysd` runs the clock and animates the passage of time itself (motivating
-   example: a Claude Code hook says "went idle," and the keyboard animates toward a
-   "cache about to expire" warning over the following 5 minutes, entirely
-   server-side). Templatable per phase 4's YAML mechanism.
+6. *(Folded into Phase 3 — see item 3.)*
 
 Windows support is an open question intentionally left for a future community PR —
 not being built or tested here.
