@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -148,6 +149,54 @@ func TestLoadAllReportsBadConfig(t *testing.T) {
 	}
 	if _, _, err := loadAll(dir); err == nil {
 		t.Error("loadAll: want error for unknown config key")
+	}
+}
+
+func TestRemoveStaleSocketRefusesLiveSocket(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "api.sock")
+	listener, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer func() { _ = listener.Close() }()
+
+	if err := removeStaleSocket(path); err == nil {
+		t.Error("removeStaleSocket: want error for a live socket, got nil")
+	}
+	if _, err := os.Lstat(path); err != nil {
+		t.Errorf("live socket file was removed: %v", err)
+	}
+}
+
+func TestRemoveStaleSocketRemovesDeadSocket(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "api.sock")
+	listener, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	// Simulate a crashed previous run: the socket file survives, but nothing
+	// is listening on it anymore. SetUnlinkOnClose(false) keeps Close() from
+	// cleaning up the file itself, so it's left behind exactly like a kill -9 would.
+	listener.(*net.UnixListener).SetUnlinkOnClose(false)
+	if err := listener.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	if err := removeStaleSocket(path); err != nil {
+		t.Errorf("removeStaleSocket: %v", err)
+	}
+	if _, err := os.Lstat(path); !os.IsNotExist(err) {
+		t.Errorf("stale socket file was not removed: err = %v", err)
+	}
+}
+
+func TestRemoveStaleSocketNoFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "api.sock")
+	if err := removeStaleSocket(path); err != nil {
+		t.Errorf("removeStaleSocket on missing file: %v", err)
 	}
 }
 

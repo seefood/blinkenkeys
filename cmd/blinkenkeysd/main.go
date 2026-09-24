@@ -122,10 +122,9 @@ func main() {
 		logger.Error("could not create socket dir", "err", err)
 		os.Exit(1)
 	}
-	// Only remove a stale socket left by a previous crashed run — never an
-	// arbitrary file a misconfigured listeners.socket.path happens to name.
-	if fi, statErr := os.Lstat(socketPath); statErr == nil && fi.Mode()&os.ModeSocket != 0 {
-		_ = os.Remove(socketPath) // #nosec G703 -- socketPath is config.yaml or the $HOME-derived default, not attacker-controlled; Mode() check above confirms it's a socket
+	if err := removeStaleSocket(socketPath); err != nil {
+		logger.Error("refusing to start", "err", err)
+		os.Exit(1)
 	}
 	listener, err := net.Listen("unix", socketPath)
 	if err != nil {
@@ -422,6 +421,26 @@ func resolveConfigDir(flagVal string, getenv func(string) string, home string) (
 		return "", fmt.Errorf("config dir %q: not a directory", flagVal)
 	}
 	return dir, nil
+}
+
+// removeStaleSocket removes a socket file left behind by a previous run that
+// crashed or was killed without cleaning up after itself — never one a live
+// process is still listening on. It dials the path first: a successful dial
+// means some process (this one's previous instance, or a second instance
+// racing this one) is genuinely serving there, so removing the file would
+// silently steal its listen address out from under it. A non-socket file (or
+// no file at all) is left for net.Listen to report on its own.
+func removeStaleSocket(path string) error {
+	fi, statErr := os.Lstat(path)
+	if statErr != nil || fi.Mode()&os.ModeSocket == 0 {
+		return nil
+	}
+	conn, dialErr := net.Dial("unix", path)
+	if dialErr == nil {
+		_ = conn.Close()
+		return fmt.Errorf("socket %s: already in use by a running process", path)
+	}
+	return os.Remove(path) // #nosec G703 -- socketPath is config.yaml or the $HOME-derived default, not attacker-controlled; Mode() check and failed dial above confirm it's a dead socket
 }
 
 // resolveSocketPath applies the socket path precedence: config.yaml (with
