@@ -1,0 +1,11 @@
+[Unit]
+Description=blinkenkeysd — VialRGB keyboard-lighting daemon
+
+[Service]
+Type=simple
+ExecStart=__BLINKENKEYSD_BIN__
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target
