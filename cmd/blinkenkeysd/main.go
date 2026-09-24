@@ -138,11 +138,25 @@ func main() {
 	}
 
 	srv := &http.Server{
-		Handler:           handler.Routes(),
+		Handler:           api.RequireToken("", false, handler.Routes()),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      10 * time.Second,
 		IdleTimeout:       60 * time.Second,
+	}
+
+	if cfg.Listeners.TCP != nil {
+		tcpSrv, tcpListener, err := newTCPServer(cfg.Listeners.TCP, handler.Routes())
+		if err != nil {
+			logger.Error("could not listen on tcp", "err", err)
+			os.Exit(1)
+		}
+		go func() {
+			logger.Info("blinkenkeysd listening", "tcp", cfg.Listeners.TCP.Address)
+			if err := tcpSrv.Serve(tcpListener); err != nil {
+				logger.Error("tcp http server exited", "err", err)
+			}
+		}()
 	}
 
 	logger.Info("blinkenkeysd listening", "socket", socketPath)
@@ -150,6 +164,27 @@ func main() {
 		logger.Error("http server exited", "err", err)
 		os.Exit(1)
 	}
+}
+
+// newTCPServer builds blinkenkeysd's optional TCP listener and its
+// bearer-token-gated http.Server — the token is mandatory here (never
+// user-configurable to disable), unlike the always-unauthenticated Unix
+// socket, since filesystem permissions no longer provide the access
+// control. cfg is non-nil only when listeners.tcp is present in config.yaml
+// (config.Load already rejects a present-but-tokenless TCP block).
+func newTCPServer(cfg *config.TCPListener, routes http.Handler) (*http.Server, net.Listener, error) {
+	listener, err := net.Listen("tcp", cfg.Address)
+	if err != nil {
+		return nil, nil, err
+	}
+	srv := &http.Server{
+		Handler:           api.RequireToken(cfg.Token, true, routes),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+	return srv, listener, nil
 }
 
 // flagAliases maps a flag's canonical multi-letter name to its single-letter
@@ -187,7 +222,7 @@ func gnuUsage() {
 // root on Linux — the design spec's fallback path for when no udev rule can
 // be installed. Unlike the old connectord/restd split, there is no
 // unprivileged process left to isolate the HTTP surface behind: root here
-// means the whole daemon, including any future TCP listener, runs as root.
+// means the whole daemon, including any TCP listener, runs as root.
 // Per the design spec's ban on syscall.Setuid/Setgid on a running process
 // (golang/go#1435), blinkenkeysd cannot safely de-escalate itself even if it
 // wanted to — this function only warns, it never attempts to drop privilege.
@@ -196,7 +231,7 @@ func warnIfRootFallback(goos string, euid int, logger *slog.Logger) {
 		return
 	}
 	logger.Warn("blinkenkeysd is running as root — this is the udev-rule-unavailable " +
-		"fallback and runs the entire HTTP surface (including any future TCP " +
+		"fallback and runs the entire HTTP surface (including any TCP " +
 		"listener) as root too; install a udev rule granting the logged-in user " +
 		"access to the device instead, per the design spec's Background section")
 }

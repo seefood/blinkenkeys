@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/seefood/blinkenkeys/config"
 	"github.com/seefood/blinkenkeys/internal/dispatcher"
 	"github.com/seefood/blinkenkeys/internal/hid"
 )
@@ -146,5 +148,51 @@ func TestLoadAllReportsBadConfig(t *testing.T) {
 	}
 	if _, _, err := loadAll(dir); err == nil {
 		t.Error("loadAll: want error for unknown config key")
+	}
+}
+
+func TestNewTCPServerEnforcesBearerToken(t *testing.T) {
+	okHandler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	tcpCfg := &config.TCPListener{Address: "127.0.0.1:0", Token: "s3cr3t"}
+	srv, listener, err := newTCPServer(tcpCfg, okHandler)
+	if err != nil {
+		t.Fatalf("newTCPServer: %v", err)
+	}
+	go func() { _ = srv.Serve(listener) }()
+	defer func() { _ = srv.Close() }()
+
+	url := "http://" + listener.Addr().String() + "/"
+
+	resp, err := http.Get(url)
+	if err != nil {
+		t.Fatalf("GET without token: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("no token: status = %d, want 401", resp.StatusCode)
+	}
+
+	req, _ := http.NewRequest(http.MethodGet, url, nil)
+	req.Header.Set("Authorization", "Bearer wrong")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET with wrong token: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("wrong token: status = %d, want 403", resp.StatusCode)
+	}
+
+	req, _ = http.NewRequest(http.MethodGet, url, nil)
+	req.Header.Set("Authorization", "Bearer s3cr3t")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET with correct token: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("correct token: status = %d, want 200", resp.StatusCode)
 	}
 }

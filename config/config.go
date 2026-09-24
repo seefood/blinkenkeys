@@ -73,10 +73,9 @@ type SocketListener struct {
 
 // TCPListener is only present in the config when explicitly enabled; Load
 // rejects one with no Token, per the spec's hard requirement that TCP is
-// never allowed without one. There's no in-code default — actually binding
-// this listener is deferred past this plan (see "Explicitly deferred past
-// this plan" below) — but wherever a concrete example is needed (docs,
-// example config.yaml), the chosen default port is :49994.
+// never allowed without one. There's no in-code default — wherever a
+// concrete example is needed (docs, example config.yaml), the chosen
+// default port is :49994.
 type TCPListener struct {
 	Address string `yaml:"address"`
 	Token   string `yaml:"token"`
