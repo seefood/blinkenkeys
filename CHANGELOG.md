@@ -47,8 +47,26 @@ revises.
   connects keeps its literal-address target, so a later command on the same key in another form doesn't supersede it.
 - **2026-09-24**: Post-implementation revision, made during Phase 3 integration
   verification: dropped the `BLINKENKEYS_CONFIG_DIR` and `BLINKENKEYS_SOCKET`
-  env vars in favor of a `-config-dir` CLI flag and `config.yaml`'s
+  env vars in favor of a `-config` CLI flag and `config.yaml`'s
   `listeners.socket.path`, respectively — config now comes from a file (or an
   explicit flag naming that file's directory) rather than ambient environment
   state. `config.Dir` keeps `$XDG_CONFIG_HOME` as the standard fallback base for
   the *default* location; it no longer accepts an override env var.
+- **2026-09-24**: Accepted known gap, found during hardware verification: a
+  running `breathe` effect's peak brightness usually undershoots 100% V by a
+  small amount (up to ~10%, depending on the effect's start-time phase offset
+  against the engine's fixed 5fps tick). `breatheFrame`'s math is correct and
+  reaches exactly full V at the true mathematical peak (see its unit tests);
+  the shortfall comes from `Engine.Tick` sampling on a global tick grid whose
+  phase is independent of each effect's start time, so the exact peak sample
+  is rarely landed on. Not fixed — the alternative (snapping each effect's
+  start time to the tick grid) trades this for a visible phase jump between
+  the first frame and the first ticked frame, which isn't clearly better.
+- **Future work (not scheduled)**: `breathe` currently scales V from 0 to the
+  given color's full V; raised during the same hardware session as a possible
+  follow-up is a `min`/`max` V pair (or fraction) so it breathes between two
+  brightness *levels* of one hue, generalizing today's behavior (`min: 0`
+  reproduces it exactly). A true two-color crossfade (blending H and S too,
+  not just V) was considered and set aside as a separate, larger primitive —
+  `alternate` already covers "two colors" as a square wave. Deferred to a
+  later phase's own brainstorm rather than folded into Phase 3.

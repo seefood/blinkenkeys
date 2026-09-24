@@ -33,7 +33,7 @@ func main() {
 	warnIfRootFallback(runtime.GOOS, os.Geteuid(), logger)
 
 	checkOnly := flag.Bool("check-config", false, "validate config.yaml, effects/ and templates/ in the config dir, then exit")
-	configDirFlag := flag.String("config-dir", "", "path to the config directory (config.yaml, effects/, templates/); default: ${XDG_CONFIG_HOME:-~/.config}/blinkenkeys")
+	configDirFlag := flag.String("config", "", "path to the config directory (config.yaml, effects/, templates/); default: ${XDG_CONFIG_HOME:-~/.config}/blinkenkeys")
 	flag.Parse()
 
 	home, err := os.UserHomeDir()
