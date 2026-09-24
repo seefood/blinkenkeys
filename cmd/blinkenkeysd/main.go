@@ -33,13 +33,17 @@ func main() {
 	warnIfRootFallback(runtime.GOOS, os.Geteuid(), logger)
 
 	checkOnly := flag.Bool("check-config", false, "validate config.yaml, effects/ and templates/ in the config dir, then exit")
+	configDirFlag := flag.String("config-dir", "", "path to the config directory (config.yaml, effects/, templates/); default: ${XDG_CONFIG_HOME:-~/.config}/blinkenkeys")
 	flag.Parse()
 
 	home, err := os.UserHomeDir()
 	if err != nil {
 		home = "."
 	}
-	cfgDir := config.Dir(os.Getenv, home)
+	cfgDir := *configDirFlag
+	if cfgDir == "" {
+		cfgDir = config.Dir(os.Getenv, home)
+	}
 	cfg, lib, err := loadAll(cfgDir)
 	if *checkOnly {
 		if err != nil {
@@ -87,18 +91,23 @@ func main() {
 	go engine.Run(ctx, effects.TickInterval)
 	handler := api.NewHandler(disp, engine, lib)
 
-	socketPath := resolveSocketPath(os.Getenv("BLINKENKEYS_SOCKET"), cfg.Listeners.Socket.Path, home)
-	if err := os.MkdirAll(filepath.Dir(socketPath), 0o700); err != nil {
+	// socketPath is derived from config.yaml / the user's own home directory —
+	// gosec's taint analysis treats config files as untrusted input reaching a
+	// filesystem path, but the only party who can set it here is the same
+	// local user running the daemon, so there is no privilege boundary being
+	// crossed.
+	socketPath := resolveSocketPath(cfg.Listeners.Socket.Path, home)
+	if err := os.MkdirAll(filepath.Dir(socketPath), 0o700); err != nil { // #nosec G703 -- socketPath is the local user's own config/env, not attacker-controlled
 		logger.Error("could not create socket dir", "err", err)
 		os.Exit(1)
 	}
-	_ = os.Remove(socketPath) // clear a stale socket left by a previous crashed run
+	_ = os.Remove(socketPath) // #nosec G703 -- clear a stale socket left by a previous crashed run; path is the local user's own config/env
 	listener, err := net.Listen("unix", socketPath)
 	if err != nil {
 		logger.Error("could not listen on unix socket", "err", err)
 		os.Exit(1)
 	}
-	if err := os.Chmod(socketPath, 0o600); err != nil {
+	if err := os.Chmod(socketPath, 0o600); err != nil { // #nosec G703 -- socketPath is the local user's own config/env, not attacker-controlled
 		logger.Error("could not chmod socket", "err", err)
 		os.Exit(1)
 	}
@@ -302,12 +311,10 @@ func loadAll(dir string) (*config.Config, *effects.Library, error) {
 	return cfg, lib, nil
 }
 
-// resolveSocketPath applies the socket path precedence: BLINKENKEYS_SOCKET
-// env > config.yaml (with ~/ expanded) > ~/.local/state/blinkenkeys/api.sock.
-func resolveSocketPath(env, configured, home string) string {
+// resolveSocketPath applies the socket path precedence: config.yaml (with
+// ~/ expanded) > ~/.local/state/blinkenkeys/api.sock.
+func resolveSocketPath(configured, home string) string {
 	switch {
-	case env != "":
-		return env
 	case strings.HasPrefix(configured, "~/"):
 		return filepath.Join(home, configured[2:])
 	case configured != "":

@@ -113,7 +113,6 @@ func TestDir(t *testing.T) {
 		env  map[string]string
 		want string
 	}{
-		{map[string]string{"BLINKENKEYS_CONFIG_DIR": "/etc/bk", "XDG_CONFIG_HOME": "/x"}, "/etc/bk"},
 		{map[string]string{"XDG_CONFIG_HOME": "/x"}, "/x/blinkenkeys"},
 		{map[string]string{}, "/home/u/.config/blinkenkeys"},
 	}

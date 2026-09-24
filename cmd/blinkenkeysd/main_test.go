@@ -74,15 +74,14 @@ func TestLogAddedHintsConfig(t *testing.T) {
 }
 
 func TestResolveSocketPath(t *testing.T) {
-	tests := []struct{ env, configured, want string }{
-		{"/run/env.sock", "/cfg.sock", "/run/env.sock"},
-		{"", "/cfg.sock", "/cfg.sock"},
-		{"", "~/bk.sock", "/home/u/bk.sock"},
-		{"", "", "/home/u/.local/state/blinkenkeys/api.sock"},
+	tests := []struct{ configured, want string }{
+		{"/cfg.sock", "/cfg.sock"},
+		{"~/bk.sock", "/home/u/bk.sock"},
+		{"", "/home/u/.local/state/blinkenkeys/api.sock"},
 	}
 	for _, tt := range tests {
-		if got := resolveSocketPath(tt.env, tt.configured, "/home/u"); got != tt.want {
-			t.Errorf("resolveSocketPath(%q, %q) = %q, want %q", tt.env, tt.configured, got, tt.want)
+		if got := resolveSocketPath(tt.configured, "/home/u"); got != tt.want {
+			t.Errorf("resolveSocketPath(%q) = %q, want %q", tt.configured, got, tt.want)
 		}
 	}
 }
