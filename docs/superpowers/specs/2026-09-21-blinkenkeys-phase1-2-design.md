@@ -2,7 +2,7 @@
 
 Date: 2026-09-21 (architecture revised 2026-09-23: dropped privilege separation
 after confirming raw HID to a vendor-defined usage page needs no macOS TCC grant;
-see "Revision history" at the end.)
+see `CHANGELOG.md` at the repo root.)
 
 ## Scope
 
@@ -24,11 +24,11 @@ phases don't require rewrites. Each such decision is marked **(forward-looking)*
   The goal is to support any compatible keyboard running a similar firmware config.
 - A Python PoC was attempted first and abandoned in favor of Go; **the originally
   documented reason (macOS Input Monitoring TCC gating raw HID) turned out to be
-  wrong** — see "macOS specifics" below and the Revision history. The Go decision
+  wrong** — see "macOS specifics" below and `CHANGELOG.md`. The Go decision
   itself is not reopened here: a single static binary with no interpreter/venv
   dependency is still the simpler deployment story, but the "Why not Python"
   rationale in the README needs updating separately from this spec.
-- macOS specifics (verified, not assumed — see Revision history for how):
+- macOS specifics (verified, not assumed — see `CHANGELOG.md` for how):
   - Raw HID access to a **vendor-defined usage page** (`0xFF60`/`0x61` here) does
     **not** require the Input Monitoring TCC grant. Confirmed three ways: (1) Vial's
     own `vial-gui` source (`src/main/python/util.py`, `is_rawhid()`) explicitly skips
@@ -290,23 +290,3 @@ independent of language choice.
 Effects/animation rendering (Phase 3), YAML status templates (Phase 4), per-client
 key allocation and terminal-tab correlation (Phase 5), server-owned timers (Phase 6),
 Windows support, TLS on the TCP listener. See `../../README.md` for the roadmap.
-
-## Revision history
-
-- **2026-09-23**: Removed the `connectord`/`restd` privilege-separation split after
-  disproving its premise. The split assumed macOS's Input Monitoring TCC grant gated
-  raw HID access to VialRGB's vendor-defined usage page, requiring a stable-identity,
-  always-unprivileged component to hold that access. Investigation (Vial's own
-  `vial-gui` source, `TCC.db` inspection, and a real hardware test) showed this access
-  was never gated in the first place. A parallel CDC-ACM ("virtual serial") POC, built
-  to route around the believed TCC gate, was also reverted from the `qmk_vial` firmware
-  once raw HID was confirmed to work without it — see `README.md`'s "Known
-  limitations" section and git history on `personal/vialrgb-direct/001-enable` for
-  that firmware experiment. Added the "State persistence & refresh" section, motivated
-  by hardware testing showing `g_direct_mode_colors` doesn't survive a reset and
-  VialRGB exposes no way to read it back.
-- **2026-09-23**: Refined "State persistence & refresh" with untethered rewire and 24h
-  cache eviction: a disconnected device's name/cache now survives a replug (rewire)
-  instead of being freed, without letting a second identity-colliding device steal an
-  already-`connected` slot, and without retaining a genuinely-gone device's cache
-  forever.

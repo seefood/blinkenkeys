@@ -22,8 +22,8 @@ end on macOS (see "Why not Python" in README.md: the Input Monitoring TCC grant
 requires a stable code-signing identity that an ad-hoc-signed `uv`-managed
 interpreter invocation doesn't have) and is superseded by the Go rewrite. **That
 original reason turned out to be wrong** — raw HID access to a vendor-defined usage
-page needs no Input Monitoring grant at all (see the design spec's Revision
-history) — but the Go decision itself stands regardless. The real implementation
+page needs no Input Monitoring grant at all (see `CHANGELOG.md`'s
+Phase 1+2 entries) — but the Go decision itself stands regardless. The real implementation
 will be Go, following the package layout in the design spec (`cmd/blinkenkeysd/`,
 `internal/...`), none of which exists yet.
 
@@ -68,8 +68,8 @@ design while implementing.)
 
 - **One process, `blinkenkeysd`**: no privilege separation. The earlier
   `connectord`/`restd` split assumed macOS's Input Monitoring TCC grant gated raw
-  HID access to VialRGB's vendor-defined usage page; that's confirmed false (see the
-  design spec's Revision history), so there's no privilege boundary to separate.
+  HID access to VialRGB's vendor-defined usage page; that's confirmed false (see
+  `CHANGELOG.md`), so there's no privilege boundary to separate.
   `blinkenkeysd` enumerates devices, runs the HTTP server, and owns the dispatcher
   all in one binary — don't reintroduce a second process or an IPC layer between
   them.

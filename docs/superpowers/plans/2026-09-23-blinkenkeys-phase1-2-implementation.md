@@ -9,7 +9,7 @@ capabilities of all connected Vial-capable devices with stable names (Phase 2).
 
 **Architecture:** One long-lived process, `blinkenkeysd`. It enumerates
 Vial-capable devices directly via `github.com/sstallion/go-hid` (no
-privilege separation — the design spec's revision history explains why the
+privilege separation — `CHANGELOG.md` explains why the
 original `connectord`/`restd` split was dropped: macOS's Input Monitoring
 TCC grant, the reason for the split, turns out not to gate raw HID access to
 a vendor-defined usage page at all), runs an HTTP server, and owns a single
