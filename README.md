@@ -91,6 +91,14 @@ I'm planning to add templates to suport all sorts of use cases, please add your 
    a mux-lifetime counter, not a small stable index) are still open.
 6. *(Folded into Phase 3 — see item 3.)*
 
+7. **Command-triggered effects** — future work, not yet designed. Selecting
+   an effect (or reaching a particular stage of one) could also fire an
+   arbitrary command, e.g. playing a sound when a countdown effect like
+   `timer5min` finishes. Would need a design pass on where the command
+   lives in the effect/template schema and what's allowed to trigger it
+   (security-sensitive: this is arbitrary command execution, so it needs a
+   real opt-in, not just a config field).
+
 Windows support is an open question intentionally left for a future community PR —
 not being built or tested here.
 
