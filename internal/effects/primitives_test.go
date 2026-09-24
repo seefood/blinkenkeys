@@ -34,7 +34,7 @@ func TestBreathe(t *testing.T) {
 		{0.5, 250 * time.Millisecond, 100},
 		{0.5, 500 * time.Millisecond, 200},
 		{0.5, 750 * time.Millisecond, 100},
-		{0.5, 1000 * time.Millisecond, 0}, // next period
+		{0.5, 1000 * time.Millisecond, 0},  // next period
 		{1.0, 500 * time.Millisecond, 100}, // rising sawtooth
 		{0.0, 0, 200},                      // falling sawtooth
 		{0.0, 500 * time.Millisecond, 100},
