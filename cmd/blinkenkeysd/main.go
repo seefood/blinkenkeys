@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"flag"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -9,12 +11,15 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strings"
 	"time"
 
 	goHid "github.com/sstallion/go-hid"
 
+	"github.com/seefood/blinkenkeys/config"
 	"github.com/seefood/blinkenkeys/internal/api"
 	"github.com/seefood/blinkenkeys/internal/dispatcher"
+	"github.com/seefood/blinkenkeys/internal/effects"
 	"github.com/seefood/blinkenkeys/internal/hid"
 )
 
@@ -27,6 +32,28 @@ func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
 	warnIfRootFallback(runtime.GOOS, os.Geteuid(), logger)
 
+	checkOnly := flag.Bool("check-config", false, "validate config.yaml, effects/ and templates/ in the config dir, then exit")
+	flag.Parse()
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		home = "."
+	}
+	cfgDir := config.Dir(os.Getenv, home)
+	cfg, _, err := loadAll(cfgDir)
+	if *checkOnly {
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		fmt.Println("ok")
+		return
+	}
+	if err != nil {
+		logger.Error("config load failed", "dir", cfgDir, "err", err)
+		os.Exit(1)
+	}
+
 	if err := goHid.Init(); err != nil {
 		logger.Error("hid init failed", "err", err)
 		os.Exit(1)
@@ -34,6 +61,11 @@ func main() {
 	defer func() { _ = goHid.Exit() }()
 
 	registry := dispatcher.NewRegistry()
+	for _, d := range cfg.Devices {
+		if d.Optional {
+			registry.Declare(d.ID)
+		}
+	}
 	cache := dispatcher.NewCache()
 	disp := dispatcher.New(registry, cache, dispatcherQueueDepth, logger)
 
@@ -54,7 +86,7 @@ func main() {
 	caps := api.NewCapabilitiesCache(disp)
 	handler := api.NewHandler(disp, caps)
 
-	socketPath := socketPathFromEnv()
+	socketPath := resolveSocketPath(os.Getenv("BLINKENKEYS_SOCKET"), cfg.Listeners.Socket.Path, home)
 	if err := os.MkdirAll(filepath.Dir(socketPath), 0o700); err != nil {
 		logger.Error("could not create socket dir", "err", err)
 		os.Exit(1)
@@ -254,13 +286,32 @@ func logAdded(logger *slog.Logger, names []string) {
 	}
 }
 
-func socketPathFromEnv() string {
-	if p := os.Getenv("BLINKENKEYS_SOCKET"); p != "" {
-		return p
-	}
-	home, err := os.UserHomeDir()
+// loadAll loads config.yaml and the effects/templates library from dir —
+// everything that must be valid before the daemon starts. -check-config runs
+// exactly this.
+func loadAll(dir string) (*config.Config, *effects.Library, error) {
+	cfg, err := config.LoadDir(dir)
 	if err != nil {
-		home = "."
+		return nil, nil, err
 	}
-	return filepath.Join(home, ".local", "state", "blinkenkeys", "api.sock")
+	lib, err := effects.Load(dir)
+	if err != nil {
+		return nil, nil, fmt.Errorf("effects: %w", err)
+	}
+	return cfg, lib, nil
+}
+
+// resolveSocketPath applies the socket path precedence: BLINKENKEYS_SOCKET
+// env > config.yaml (with ~/ expanded) > ~/.local/state/blinkenkeys/api.sock.
+func resolveSocketPath(env, configured, home string) string {
+	switch {
+	case env != "":
+		return env
+	case strings.HasPrefix(configured, "~/"):
+		return filepath.Join(home, configured[2:])
+	case configured != "":
+		return configured
+	default:
+		return filepath.Join(home, ".local", "state", "blinkenkeys", "api.sock")
+	}
 }

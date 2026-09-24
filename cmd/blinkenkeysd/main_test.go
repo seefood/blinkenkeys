@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -68,5 +70,49 @@ func TestLogAddedHintsConfig(t *testing.T) {
 	logAdded(slog.New(slog.NewTextHandler(&buf, nil)), []string{"uid-0102"})
 	if !strings.Contains(buf.String(), "uid-0102") || !strings.Contains(buf.String(), "optional: true") {
 		t.Errorf("log = %q", buf.String())
+	}
+}
+
+func TestResolveSocketPath(t *testing.T) {
+	tests := []struct{ env, configured, want string }{
+		{"/run/env.sock", "/cfg.sock", "/run/env.sock"},
+		{"", "/cfg.sock", "/cfg.sock"},
+		{"", "~/bk.sock", "/home/u/bk.sock"},
+		{"", "", "/home/u/.local/state/blinkenkeys/api.sock"},
+	}
+	for _, tt := range tests {
+		if got := resolveSocketPath(tt.env, tt.configured, "/home/u"); got != tt.want {
+			t.Errorf("resolveSocketPath(%q, %q) = %q, want %q", tt.env, tt.configured, got, tt.want)
+		}
+	}
+}
+
+func TestLoadAllExamples(t *testing.T) {
+	if _, _, err := loadAll(filepath.Join("..", "..", "examples", "config")); err != nil {
+		t.Errorf("loadAll(examples/config): %v", err)
+	}
+}
+
+func TestLoadAllReportsBadEffect(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "effects"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "effects", "bad.yaml"), []byte("stages: []\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err := loadAll(dir)
+	if err == nil || !strings.Contains(err.Error(), "bad.yaml") {
+		t.Errorf("loadAll err = %v, want one naming bad.yaml", err)
+	}
+}
+
+func TestLoadAllReportsBadConfig(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("bogus: 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := loadAll(dir); err == nil {
+		t.Error("loadAll: want error for unknown config key")
 	}
 }
