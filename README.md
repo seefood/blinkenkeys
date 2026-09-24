@@ -122,6 +122,10 @@ than adding TLS to `blinkenkeysd` itself. If you feel good about running an open
 daemon on your LAN and let any of your coworkers changing your key colours,
 feel free to patch it, but I don't condone it :)
 
+See
+[`docs/superpowers/manual-checks/tcp-listener.md`](docs/superpowers/manual-checks/tcp-listener.md)
+for the TCP listener's manual verification checklist.
+
 ## Known limitations
 
 `blinkenkeysd` opens the device's raw-HID interface exclusively, the same way Vial's
