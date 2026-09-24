@@ -4,13 +4,22 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN_DIR="${XDG_BIN_HOME:-$HOME/.local/bin}"
 UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
-RULES_DEST="/etc/udev/rules.d/99-blinkenkeys.rules"
+RULES_DEST="/etc/udev/rules.d/70-blinkenkeys.rules"
 SERVICE_NAME="blinkenkeysd.service"
 
 FORCE=0
-if [[ "${1:-}" == "--force" ]]; then
-	FORCE=1
+if [[ $# -gt 1 ]]; then
+	echo "usage: $0 [--force]" >&2
+	exit 2
 fi
+case "${1:-}" in
+"") ;;
+--force) FORCE=1 ;;
+*)
+	echo "usage: $0 [--force]" >&2
+	exit 2
+	;;
+esac
 
 bin_changed=0
 unit_changed=0
@@ -26,8 +35,10 @@ fi
 
 DEST_BIN="$BIN_DIR/blinkenkeysd"
 if [[ "$FORCE" -eq 1 ]] || ! cmp -s "$SRC_BIN" "$DEST_BIN" 2>/dev/null; then
-	cp "$SRC_BIN" "$DEST_BIN"
-	chmod +x "$DEST_BIN"
+	# install(1) unlinks the destination and creates a fresh inode instead of
+	# truncating in place, so this works even while the old binary is running
+	# (plain cp fails with ETXTBSY in that case).
+	install -m 0755 "$SRC_BIN" "$DEST_BIN"
 	bin_changed=1
 fi
 
@@ -41,8 +52,8 @@ if [[ "$FORCE" -eq 1 ]] || ! cmp -s "$RENDERED_UNIT" "$DEST_UNIT" 2>/dev/null; t
 	unit_changed=1
 fi
 
-if [[ "$FORCE" -eq 1 ]] || ! cmp -s "$SCRIPT_DIR/99-blinkenkeys.rules" "$RULES_DEST" 2>/dev/null; then
-	sudo install -m 0644 "$SCRIPT_DIR/99-blinkenkeys.rules" "$RULES_DEST"
+if [[ "$FORCE" -eq 1 ]] || ! cmp -s "$SCRIPT_DIR/70-blinkenkeys.rules" "$RULES_DEST" 2>/dev/null; then
+	sudo install -m 0644 "$SCRIPT_DIR/70-blinkenkeys.rules" "$RULES_DEST"
 	sudo udevadm control --reload-rules
 	sudo udevadm trigger
 	rule_changed=1

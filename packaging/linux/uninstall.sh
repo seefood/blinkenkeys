@@ -3,8 +3,13 @@ set -euo pipefail
 
 BIN_DIR="${XDG_BIN_HOME:-$HOME/.local/bin}"
 UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
-RULES_DEST="/etc/udev/rules.d/99-blinkenkeys.rules"
+RULES_DEST="/etc/udev/rules.d/70-blinkenkeys.rules"
 SERVICE_NAME="blinkenkeysd.service"
+
+if [[ $# -ne 0 ]]; then
+	echo "usage: $0" >&2
+	exit 2
+fi
 
 DEST_BIN="$BIN_DIR/blinkenkeysd"
 DEST_UNIT="$UNIT_DIR/$SERVICE_NAME"

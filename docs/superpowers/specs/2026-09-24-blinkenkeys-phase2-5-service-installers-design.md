@@ -72,7 +72,7 @@ initial review.)
 packaging/
   linux/
     blinkenkeysd.service   # systemd --user unit template
-    99-blinkenkeys.rules   # udev rule template
+    70-blinkenkeys.rules   # udev rule template
     install.sh             # Linux installer (implemented this pass)
     uninstall.sh           # Linux uninstaller (implemented this pass)
   macos/
@@ -88,18 +88,29 @@ on a user's system are diffable in the repo and in `git log`.
 
 ### Linux: udev rule
 
-`packaging/linux/99-blinkenkeys.rules`:
+`packaging/linux/70-blinkenkeys.rules`:
 
 ```
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{serial}=="vial:*", MODE="0660", TAG+="uaccess"
 ```
 
-Installed to `/etc/udev/rules.d/99-blinkenkeys.rules` — a name distinct from
+Installed to `/etc/udev/rules.d/70-blinkenkeys.rules` — a name distinct from
 the user's existing `99-vial.rules`, so the installer only ever writes its own
 file and never touches the pre-existing one. `TAG+="uaccess"` matches the
 design spec's stated primary mechanism (systemd-logind seat ACL); this project
-doesn't add a `GROUP=`-based fallback since `uaccess` is already confirmed
-working on the dev machine.
+doesn't add a `GROUP=`-based fallback.
+
+The `70-` prefix is load-bearing, not cosmetic: systemd ships
+`73-seat-late.rules`, whose `TAG=="uaccess", RUN{builtin}+="uaccess"` line is
+what actually applies the ACL, and udev evaluates `/etc/udev/rules.d/` in
+lexical filename order. A rule numbered `99-` adds the `uaccess` tag *after*
+`73-seat-late.rules` already ran, so the builtin is never queued and no ACL is
+granted — confirmed on the dev machine (final review, 2026-09-24): the earlier
+draft's `99-blinkenkeys.rules` left the matching `hidraw` nodes with no
+`user:<name>:rw-` ACL entry at all. The dev machine's access came entirely
+from the pre-existing `99-vial.rules`'s `GROUP="1000"` line, which hid the
+gap. `70-` sits alongside systemd's own `70-uaccess.rules`, safely before
+`73-seat-late.rules`.
 
 ### Linux: systemd `--user` unit
 
@@ -155,8 +166,8 @@ Steps:
    `__BLINKENKEYSD_BIN__` → `$BIN_DIR/blinkenkeysd`) and write to
    `${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/blinkenkeysd.service`. Skip
    if identical unless `--force`. Track whether it changed.
-5. Compare `packaging/linux/99-blinkenkeys.rules` against
-   `/etc/udev/rules.d/99-blinkenkeys.rules`; if missing or different (or
+5. Compare `packaging/linux/70-blinkenkeys.rules` against
+   `/etc/udev/rules.d/70-blinkenkeys.rules`; if missing or different (or
    `--force`), `sudo install -m 0644` it into place, then
    `sudo udevadm control --reload-rules && sudo udevadm trigger`. Skip both
    `sudo` calls entirely if the file's already correct.
@@ -187,7 +198,7 @@ Steps:
    the unit isn't loaded at all.
 2. Remove `${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/blinkenkeysd.service`
    if present, then `systemctl --user daemon-reload`.
-3. If `/etc/udev/rules.d/99-blinkenkeys.rules` exists, `sudo rm` it, then
+3. If `/etc/udev/rules.d/70-blinkenkeys.rules` exists, `sudo rm` it, then
    `sudo udevadm control --reload-rules && sudo udevadm trigger`. Never
    touches `99-vial.rules`.
 4. Remove `${XDG_BIN_HOME:-$HOME/.local/bin}/blinkenkeysd` if present.
