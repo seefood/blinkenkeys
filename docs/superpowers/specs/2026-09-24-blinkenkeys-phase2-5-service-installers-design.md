@@ -20,8 +20,9 @@ of the original 6-phase product roadmap (`README.md` has no packaging/install
 phase); it's follow-on work the user asked for after Phases 1+2 landed.
 
 Not in scope: `config.Load` wiring into `main()` (still deferred, tracked
-separately — see the Phase 1+2 plan's "Explicitly deferred" section), an
-uninstall script, and any Windows service story.
+separately — see the Phase 1+2 plan's "Explicitly deferred" section), and any
+Windows service story. (A Linux `uninstall.sh` is in scope — added after
+initial review.)
 
 ## Background / constraints
 
@@ -73,6 +74,7 @@ packaging/
     blinkenkeysd.service   # systemd --user unit template
     99-blinkenkeys.rules   # udev rule template
     install.sh             # Linux installer (implemented this pass)
+    uninstall.sh           # Linux uninstaller (implemented this pass)
   macos/
     com.seefood.blinkenkeysd.plist   # LaunchAgent template
     install.sh                        # macOS installer (design only — not implemented this pass)
@@ -170,6 +172,31 @@ Steps:
 
 `--force`: reinstalls/overwrites all three artifacts unconditionally,
 regardless of whether they differ.
+
+### Linux: `uninstall.sh`
+
+`packaging/linux/uninstall.sh`. Reverses each `install.sh` step, in roughly
+reverse order, and is itself idempotent — safe to run on a partial or already-
+removed install (each step checks existence first and no-ops if the artifact
+isn't there, rather than erroring).
+
+Steps:
+
+1. If `systemctl --user is-enabled blinkenkeysd.service` (or `is-active`)
+   succeeds, `systemctl --user disable --now blinkenkeysd.service`. Skip if
+   the unit isn't loaded at all.
+2. Remove `${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/blinkenkeysd.service`
+   if present, then `systemctl --user daemon-reload`.
+3. If `/etc/udev/rules.d/99-blinkenkeys.rules` exists, `sudo rm` it, then
+   `sudo udevadm control --reload-rules && sudo udevadm trigger`. Never
+   touches `99-vial.rules`.
+4. Remove `${XDG_BIN_HOME:-$HOME/.local/bin}/blinkenkeysd` if present.
+5. Print a summary of what was removed vs. already absent.
+
+Doesn't remove `${XDG_CONFIG_HOME:-$HOME/.config}/blinkenkeys` (user config/
+effects/templates) or `~/.local/state/blinkenkeys` (socket dir, cache) —
+those are user data, not installer-owned artifacts, so uninstalling the
+service shouldn't delete them.
 
 ### macOS: LaunchAgent plist
 
@@ -281,9 +308,9 @@ mocking away the entire point of the script. Verification is:
   `docs/superpowers/manual-checks/phase2-5-linux-install.md`, following the
   same pattern as the Phase 1+2 hardware round-trip doc. Covers: fresh install
   from a clean state, idempotent re-run (confirm no-op, no unnecessary `sudo`
-  prompts), `--force` re-install, and a by-hand uninstall note (no uninstall
-  script is being built this pass, but the doc records what to remove
-  manually: the two artifact files, the systemd unit disable/daemon-reload).
+  prompts), `--force` re-install, `uninstall.sh` removing all three artifacts
+  and leaving user config/state untouched, and re-running `uninstall.sh` on an
+  already-clean system (confirm no-op, no errors).
 - **Manual, macOS (deferred to the user):** an equivalent
   `docs/superpowers/manual-checks/phase2-5-macos-install.md` is not written in
   this pass — the user will write and run it alongside their own
@@ -293,10 +320,10 @@ mocking away the entire point of the script. Verification is:
 
 ## Explicitly deferred past this spec
 
-- Writing `packaging/macos/install.sh` and the macOS manual-check doc, and
-  testing both against real launchd/macOS behavior (design is complete above;
-  the user will implement and verify it on their own laptop).
-- An uninstall script (either platform).
+- Writing `packaging/macos/install.sh`, `packaging/macos/uninstall.sh`, and
+  the macOS manual-check doc, and testing all three against real
+  launchd/macOS behavior (design is complete above for `install.sh`; the user
+  will design, implement, and verify the macOS side on their own laptop).
 - A root-fallback path in `install.sh` for environments where the udev rule
   can't be installed (e.g. no `sudo` access) — the design spec's warned-root-
   fallback (`warnIfRootFallback`) is a `blinkenkeysd` runtime concern, not an
