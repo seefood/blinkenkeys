@@ -55,9 +55,12 @@ I'm planning to add templates to suport all sorts of use cases, please add your 
 5. **Per-client key allocation** — done. A subscriber (e.g. a coding agent
    instance) is allocated a key by name and directs its own state to it; the
    pool auto-assigns the next unclaimed key (ascending row/col order) and
-   releases on explicit `DELETE` or an idle timeout. Still open, unsolved: how
-   to correlate a subscriber to a specific terminal tab (iTerm/WezTerm)
-   automatically — today's allocation order has no notion of tabs/panes.
+   releases on explicit `DELETE` or an idle timeout. Terminal-pane
+   correlation (WezTerm) has a first cut: see
+   `integrations/claude/hooks-wezterm-pane.json` — a direct `R,C` write to
+   row 0, column `$WEZTERM_PANE % <row-0 width>`, alongside the per-session
+   pooled key. iTerm and a less collision-prone mapping (`$WEZTERM_PANE` is
+   a mux-lifetime counter, not a small stable index) are still open.
 6. *(Folded into Phase 3 — see item 3.)*
 
 Windows support is an open question intentionally left for a future community PR —
