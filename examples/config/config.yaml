@@ -1,0 +1,21 @@
+# Sample blinkenkeysd config. Copy to ${XDG_CONFIG_HOME:-~/.config}/blinkenkeys/config.yaml
+# and edit the `devices:` entry to match your own board (see README.md in
+# this directory for the full schema reference).
+
+naming:
+  prefer: uid
+
+listeners:
+  socket:
+    path: "" # default: ~/.local/state/blinkenkeys/api.sock
+  # tcp:                    # uncomment to also listen on TCP (token becomes mandatory)
+  #   address: ":49994"
+  #   token: "change-me"
+
+devices:
+  - id: "macropad" # replace with a name of your choosing; find your
+    optional: false # device's uid via `curl --unix-socket .../api.sock
+    # http://localhost/devices` after first connecting it
+
+claims:
+  idle_timeout: "8h"
