@@ -60,7 +60,7 @@ type TCPListener struct {
 // Dir returns blinkenkeysd's default config directory:
 // ${XDG_CONFIG_HOME:-home/.config}/blinkenkeys. It holds config.yaml,
 // effects/, and templates/. Callers wanting a non-default location use the
-// -config flag instead of overriding this.
+// --config flag instead of overriding this.
 func Dir(getenv func(string) string, home string) string {
 	base := getenv("XDG_CONFIG_HOME")
 	if base == "" {

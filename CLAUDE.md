@@ -35,9 +35,9 @@ make test                         # go test ./...
 make lint                         # prek run --all-files
 ```
 
-`bin/blinkenkeysd` itself takes `-config=<dir>` (default:
+`bin/blinkenkeysd` itself takes `-c`/`--config=<dir>` (default:
 `${XDG_CONFIG_HOME:-~/.config}/blinkenkeys`; `config.yaml`, `effects/`,
-`templates/` live there) and `-check-config` (validates that directory and
+`templates/` live there) and `--check-config` (validates that directory and
 exits, without opening any HID device or listener).
 
 Requires Go 1.27+, a C compiler (cgo — `github.com/sstallion/go-hid` bundles

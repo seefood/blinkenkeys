@@ -41,17 +41,19 @@ revises.
   file is literal); primitive settings are all required, under the stage key
   `settings`; strict `config.yaml` decoding; `0xFF` LEDs excluded from
   `R,C`/`idx:`; `ConnectedWithoutCaps` drives the capabilities retry (`Added` only
-  feeds the first-seen log hint); single-job redraw; `-check-config`; unknown
+  feeds the first-seen log hint); single-job redraw; `--check-config`; unknown
   effect/state 404s list the known names; `duration: 3m` strings.
   Accepted known gap: an effect started on a pre-declared device before it first
   connects keeps its literal-address target, so a later command on the same key in another form doesn't supersede it.
 - **2026-09-24**: Post-implementation revision, made during Phase 3 integration
   verification: dropped the `BLINKENKEYS_CONFIG_DIR` and `BLINKENKEYS_SOCKET`
-  env vars in favor of a `-config` CLI flag and `config.yaml`'s
+  env vars in favor of a `--config` CLI flag and `config.yaml`'s
   `listeners.socket.path`, respectively — config now comes from a file (or an
   explicit flag naming that file's directory) rather than ambient environment
   state. `config.Dir` keeps `$XDG_CONFIG_HOME` as the standard fallback base for
-  the *default* location; it no longer accepts an override env var.
+  the *default* location; it no longer accepts an override env var. `--config`
+  also got a `-c` shorthand, per GNU CLI convention (single dash reserved for
+  single-letter names; `--check-config` has no shorthand).
 - **2026-09-24**: Accepted known gap, found during hardware verification: a
   running `breathe` effect's peak (and trough) brightness usually misses its
   target V by an amount that scales with the effect's frequency and duty

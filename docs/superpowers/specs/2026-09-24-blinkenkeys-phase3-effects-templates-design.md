@@ -174,7 +174,7 @@ schema changes. A primitive declares its settings (name, type) so the loader can
 validate YAML against it, and it is a pure function
 `(settings, elapsedInStage) → HSV`. Every setting is required: there are no
 defaults, so an effect file states everything it does, and a missing setting
-fails loading (and `-check-config`).
+fails loading (and `--check-config`).
 
 | Primitive | Settings (all required) | Behavior |
 |---|---|---|
@@ -254,7 +254,7 @@ ignored. On a fatal error the daemon logs the file and reason and exits nonzero
 rather than running with a partial set. Every effect is compiled at load time, so
 load-time validation is complete and a request can never hit an invalid effect.
 
-`blinkenkeysd -check-config` runs exactly this loading and validation (plus
+`blinkenkeysd --check-config` runs exactly this loading and validation (plus
 `config.yaml`), prints `ok` or the error, and exits 0 or 1 without touching HID
 or the socket. Since there's no hot reload, this is how to validate an edit before
 restarting the service.
@@ -377,7 +377,7 @@ devices:
 ### 6. Config wiring
 
 > Revised post-implementation: the `$BLINKENKEYS_CONFIG_DIR` / `BLINKENKEYS_SOCKET`
-> env vars described below were replaced with a `-config` CLI flag and
+> env vars described below were replaced with a `--config` CLI flag and
 > `config.yaml`'s `listeners.socket.path` — see CHANGELOG.md's 2026-09-24
 > "Post-implementation revision" entry for the reasoning.
 
@@ -394,7 +394,7 @@ devices:
   so typos fail loudly. No existing user config can break, because Phase 1+2
   never wired `config.Load` into the daemon.
 - `main()` loads config, then effects and templates, before enumeration. Any error
-  is fatal at startup. `-check-config` (§2) stops right after this step.
+  is fatal at startup. `--check-config` (§2) stops right after this step.
 
 ### 7. REST surface
 
@@ -464,7 +464,7 @@ examples/config/      effects/timer5min.yaml, effects/breathe_blue.yaml,
   `EnsureCapabilities`, latest write per key wins, unresolvable entries are
   dropped.
 - **Config**: strict decoding, `devices:` id validation, missing file → defaults,
-  config-dir and socket-path precedence; `-check-config` exit codes.
+  config-dir and socket-path precedence; `--check-config` exit codes.
 - **API**: status table in §1 row by row; body exclusivity; ordinal resolution and
   out-of-range; 501 for names.
 - **Manual/gated** (`docs/superpowers/manual-checks/phase3-effects.md`): run

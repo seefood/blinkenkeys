@@ -33,14 +33,18 @@ func main() {
 	warnIfRootFallback(runtime.GOOS, os.Geteuid(), logger)
 
 	checkOnly := flag.Bool("check-config", false, "validate config.yaml, effects/ and templates/ in the config dir, then exit")
-	configDirFlag := flag.String("config", "", "path to the config directory (config.yaml, effects/, templates/); default: ${XDG_CONFIG_HOME:-~/.config}/blinkenkeys")
+	var configDirFlag string
+	const configUsage = "path to the config directory (config.yaml, effects/, templates/); default: ${XDG_CONFIG_HOME:-~/.config}/blinkenkeys"
+	flag.StringVar(&configDirFlag, "config", "", configUsage)
+	flag.StringVar(&configDirFlag, "c", "", configUsage)
+	flag.Usage = gnuUsage
 	flag.Parse()
 
 	home, err := os.UserHomeDir()
 	if err != nil {
 		home = "."
 	}
-	cfgDir, dirErr := resolveConfigDir(*configDirFlag, os.Getenv, home)
+	cfgDir, dirErr := resolveConfigDir(configDirFlag, os.Getenv, home)
 	if dirErr != nil {
 		if *checkOnly {
 			fmt.Fprintln(os.Stderr, dirErr)
@@ -134,6 +138,37 @@ func main() {
 		logger.Error("http server exited", "err", err)
 		os.Exit(1)
 	}
+}
+
+// flagAliases maps a flag's canonical multi-letter name to its single-letter
+// GNU shorthand. gnuUsage prints the pair as one combined "-x, --name" entry
+// instead of two separate flags.
+var flagAliases = map[string]string{"config": "c"}
+
+// gnuUsage replaces flag's default Usage, which always renders a single
+// leading dash regardless of name length: GNU convention reserves that for
+// single-letter names ("-c") and uses a double dash for multi-letter ones
+// ("--config", "--check-config").
+func gnuUsage() {
+	out := flag.CommandLine.Output()
+	_, _ = fmt.Fprintf(out, "Usage of %s:\n", os.Args[0])
+	shorthands := make(map[string]bool, len(flagAliases))
+	for _, short := range flagAliases {
+		shorthands[short] = true
+	}
+	flag.VisitAll(func(f *flag.Flag) {
+		if shorthands[f.Name] {
+			return // printed alongside its long form below
+		}
+		name := "--" + f.Name
+		if len(f.Name) == 1 {
+			name = "-" + f.Name
+		}
+		if short, ok := flagAliases[f.Name]; ok {
+			name = "-" + short + ", --" + f.Name
+		}
+		_, _ = fmt.Fprintf(out, "  %s\n    \t%s\n", name, f.Usage)
+	})
 }
 
 // warnIfRootFallback logs a prominent warning when blinkenkeysd is running as
@@ -306,7 +341,7 @@ func logAdded(logger *slog.Logger, names []string) {
 }
 
 // loadAll loads config.yaml and the effects/templates library from dir —
-// everything that must be valid before the daemon starts. -check-config runs
+// everything that must be valid before the daemon starts. --check-config runs
 // exactly this.
 func loadAll(dir string) (*config.Config, *effects.Library, error) {
 	cfg, err := config.LoadDir(dir)
@@ -320,10 +355,10 @@ func loadAll(dir string) (*config.Config, *effects.Library, error) {
 	return cfg, lib, nil
 }
 
-// resolveConfigDir applies -config's precedence over the default
+// resolveConfigDir applies -c/--config's precedence over the default
 // (${XDG_CONFIG_HOME:-~/.config}/blinkenkeys, with ~/ expanded): an explicit
 // flag value must name an existing directory, so a typo fails loudly instead
-// of -check-config silently falling through to "ok" with an empty library.
+// of --check-config silently falling through to "ok" with an empty library.
 func resolveConfigDir(flagVal string, getenv func(string) string, home string) (string, error) {
 	if flagVal == "" {
 		return config.Dir(getenv, home), nil

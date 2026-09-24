@@ -15,8 +15,8 @@ bk() { curl -s -w '%{http_code}\n' --unix-socket "$SOCK" -X PUT -d "$2" "http://
 ```
 
 1. `make build`, then
-   `./bin/blinkenkeysd -config=examples/config -check-config` → `ok`.
-2. Start `./bin/blinkenkeysd -config=examples/config`. Confirm a
+   `./bin/blinkenkeysd --config=examples/config --check-config` → `ok`.
+2. Start `./bin/blinkenkeysd --config=examples/config`. Confirm a
    "new device seen" log line naming the board, with a `devices:` snippet.
 3. **Timer stages:** `bk 0,0 '{"state":"claude/idle"}'` → `204`. Key is green for
    3 minutes, then alternates mostly-green, then mostly-red after minute 4, then
@@ -34,5 +34,5 @@ bk() { curl -s -w '%{http_code}\n' --unix-socket "$SOCK" -X PUT -d "$2" "http://
 7. **Pre-declared device:** stop the daemon, put the logged snippet from step 2 into
    `examples/config`-copy `config.yaml` (use a temp copy, e.g.
    `cp -r examples/config /tmp/bkcfg`), unplug the board, and start with
-   `-config=/tmp/bkcfg`. `bk 0,0 '{"color":"#00ffff"}'` → `204`;
+   `--config=/tmp/bkcfg`. `bk 0,0 '{"color":"#00ffff"}'` → `204`;
    `GET /devices/0` → `503`. Plug in → key turns cyan within ~1 s.
