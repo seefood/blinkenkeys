@@ -41,3 +41,8 @@ type PendingWrite struct {
 	Addr  keyaddr.Address
 	Color color.HSV
 }
+
+// ErrCapsUnknown is returned by GetCapabilities for a device that isn't
+// connected and whose capabilities were never fetched (a pre-declared,
+// never-seen device) — internal/api maps this to a 503.
+var ErrCapsUnknown = errors.New("dispatcher: device capabilities not yet known")

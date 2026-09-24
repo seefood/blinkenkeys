@@ -2,8 +2,10 @@ package dispatcher
 
 import (
 	"context"
+	"log/slog"
 
 	"github.com/seefood/blinkenkeys/internal/hid"
+	"github.com/seefood/blinkenkeys/internal/keyaddr"
 )
 
 type opKind int
@@ -32,13 +34,14 @@ type Dispatcher struct {
 	registry *Registry
 	cache    *Cache
 	queue    chan job
+	logger   *slog.Logger
 }
 
 // New creates a Dispatcher. queueDepth bounds in-flight requests (spec:
 // e.g. 64) — a full queue fails fast with ErrQueueFull rather than growing
 // goroutines/memory without bound.
-func New(registry *Registry, cache *Cache, queueDepth int) *Dispatcher {
-	return &Dispatcher{registry: registry, cache: cache, queue: make(chan job, queueDepth)}
+func New(registry *Registry, cache *Cache, queueDepth int, logger *slog.Logger) *Dispatcher {
+	return &Dispatcher{registry: registry, cache: cache, queue: make(chan job, queueDepth), logger: logger}
 }
 
 func (d *Dispatcher) submit(ctx context.Context, j job) (jobResult, error) {
@@ -79,8 +82,18 @@ func (d *Dispatcher) ListDevices(ctx context.Context) ([]DeviceSummary, error) {
 	return res.list, res.err
 }
 
-// GetCapabilities returns device's LED count and matrix positions.
+// GetCapabilities returns device's LED count and matrix positions. Stored
+// capabilities (kept on the registry slot, surviving Untethered) are
+// returned without touching the queue; otherwise a Connected device is
+// queried once through the dispatcher goroutine and the result stored.
 func (d *Dispatcher) GetCapabilities(ctx context.Context, device string) (Capabilities, error) {
+	caps, known, exists := d.registry.Caps(device)
+	if !exists {
+		return Capabilities{}, ErrDeviceNotFound
+	}
+	if known {
+		return caps, nil
+	}
 	res, err := d.submit(ctx, job{kind: opGetCapabilities, device: device, reply: make(chan jobResult, 1)})
 	if err != nil {
 		return Capabilities{}, err
@@ -124,7 +137,7 @@ func (d *Dispatcher) dispatchGroup(group []job) {
 	case opListDevices:
 		group[0].reply <- jobResult{list: d.registry.Summaries()}
 	case opGetCapabilities:
-		caps, err := d.getCapabilities(group[0].device)
+		caps, err := d.fetchCapabilities(group[0].device)
 		group[0].reply <- jobResult{caps: caps, err: err}
 	}
 }
@@ -149,11 +162,29 @@ func (d *Dispatcher) dispatchSetKeys(group []job) {
 	}
 }
 
-func (d *Dispatcher) getCapabilities(device string) (Capabilities, error) {
+// fetchCapabilities runs on the dispatcher goroutine. It re-checks for
+// stored caps (a concurrent request may have fetched them since this job
+// was queued), else queries the device and stores the result, resolving
+// any pending writes into the cache.
+func (d *Dispatcher) fetchCapabilities(device string) (Capabilities, error) {
+	if caps, known, _ := d.registry.Caps(device); known {
+		return caps, nil
+	}
 	ctrl, ok := d.registry.Get(device)
 	if !ok {
-		return Capabilities{}, ErrDeviceNotFound
+		return Capabilities{}, ErrCapsUnknown
 	}
+	caps, err := queryCapabilities(ctrl)
+	if err != nil {
+		return Capabilities{}, err
+	}
+	d.registry.SetCaps(device, caps, func(pending []PendingWrite) {
+		d.applyPending(device, caps, pending)
+	})
+	return caps, nil
+}
+
+func queryCapabilities(ctrl hid.Controller) (Capabilities, error) {
 	n, err := ctrl.GetNumberLEDs()
 	if err != nil {
 		return Capabilities{}, err
@@ -167,6 +198,19 @@ func (d *Dispatcher) getCapabilities(device string) (Capabilities, error) {
 		caps.Positions = append(caps.Positions, LEDPosition{Index: i, Row: row, Col: col})
 	}
 	return caps, nil
+}
+
+// applyPending resolves pending writes (arrival order, so the latest write
+// per key wins) into the cache. Called by Registry.SetCaps under its lock.
+func (d *Dispatcher) applyPending(device string, caps Capabilities, pending []PendingWrite) {
+	for _, w := range pending {
+		idx, ok := keyaddr.Resolve(w.Addr, caps.LEDCount, caps.Positions)
+		if !ok {
+			d.logger.Warn("dropping pending write: key not on device", "device", device, "addr", w.Addr.String())
+			continue
+		}
+		d.cache.Update(device, []hid.KeyColor{{Index: idx, H: w.Color.H, S: w.Color.S, V: w.Color.V}})
+	}
 }
 
 func failAll(group []job, err error) {

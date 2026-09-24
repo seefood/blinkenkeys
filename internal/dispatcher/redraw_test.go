@@ -15,7 +15,7 @@ func discardLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Disca
 func TestRedrawEmptyCacheIsNoop(t *testing.T) {
 	fc := &fakeController{}
 	reg := registryWithConnected("a", fc)
-	d := New(reg, NewCache(), 8)
+	d := New(reg, NewCache(), 8, discardLogger())
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go d.Run(ctx)
@@ -23,8 +23,8 @@ func TestRedrawEmptyCacheIsNoop(t *testing.T) {
 	if err := d.Redraw(context.Background(), "a"); err != nil {
 		t.Fatalf("Redraw: %v", err)
 	}
-	if fc.lastSet != nil {
-		t.Errorf("SetKeys called on empty cache: %+v", fc.lastSet)
+	if fc.lastSet() != nil {
+		t.Errorf("SetKeys called on empty cache: %+v", fc.lastSet())
 	}
 }
 
@@ -33,7 +33,7 @@ func TestRedrawReplaysCache(t *testing.T) {
 	reg := registryWithConnected("a", fc)
 	cache := NewCache()
 	cache.Update("a", []hid.KeyColor{{Index: 0, H: 1, S: 2, V: 3}})
-	d := New(reg, cache, 8)
+	d := New(reg, cache, 8, discardLogger())
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go d.Run(ctx)
@@ -41,8 +41,8 @@ func TestRedrawReplaysCache(t *testing.T) {
 	if err := d.Redraw(context.Background(), "a"); err != nil {
 		t.Fatalf("Redraw: %v", err)
 	}
-	if len(fc.lastSet) != 1 || fc.lastSet[0].H != 1 {
-		t.Errorf("SetKeys called with %+v", fc.lastSet)
+	if len(fc.lastSet()) != 1 || fc.lastSet()[0].H != 1 {
+		t.Errorf("SetKeys called with %+v", fc.lastSet())
 	}
 }
 
@@ -52,17 +52,17 @@ func TestRedrawReconnectedOnlyTouchesGivenDevices(t *testing.T) {
 	cache := NewCache()
 	cache.Update("a", []hid.KeyColor{{Index: 0}})
 	cache.Update("b", []hid.KeyColor{{Index: 0}})
-	d := New(reg, cache, 8)
+	d := New(reg, cache, 8, discardLogger())
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go d.Run(ctx)
 
 	d.RedrawReconnected(context.Background(), []string{"a"}, discardLogger())
 
-	if fcA.lastSet == nil {
+	if fcA.lastSet() == nil {
 		t.Error("device a (reconnected) was not redrawn")
 	}
-	if fcB.lastSet != nil {
+	if fcB.lastSet() != nil {
 		t.Error("device b (not in reconnected list) should not have been redrawn")
 	}
 }
@@ -72,7 +72,7 @@ func TestRunPeriodicRedrawFiresOnTick(t *testing.T) {
 	reg := registryWithConnected("a", fc)
 	cache := NewCache()
 	cache.Update("a", []hid.KeyColor{{Index: 0}})
-	d := New(reg, cache, 8)
+	d := New(reg, cache, 8, discardLogger())
 	dispatchCtx, cancelDispatch := context.WithCancel(context.Background())
 	defer cancelDispatch()
 	go d.Run(dispatchCtx)
@@ -81,7 +81,7 @@ func TestRunPeriodicRedrawFiresOnTick(t *testing.T) {
 	defer cancelRedraw()
 	d.RunPeriodicRedraw(redrawCtx, 10*time.Millisecond, discardLogger())
 
-	if fc.lastSet == nil {
+	if fc.lastSet() == nil {
 		t.Error("periodic redraw never fired within the test window")
 	}
 }
@@ -89,7 +89,7 @@ func TestRunPeriodicRedrawFiresOnTick(t *testing.T) {
 func TestReconnectRewireRegainsCache(t *testing.T) {
 	reg := NewRegistry()
 	cache := NewCache()
-	d := New(reg, cache, 8)
+	d := New(reg, cache, 8, discardLogger())
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go d.Run(ctx)
@@ -117,7 +117,7 @@ func TestReconnectRewireRegainsCache(t *testing.T) {
 
 	d.RedrawReconnected(context.Background(), res.Reconnected, discardLogger())
 
-	if len(fc2.lastSet) != 1 || fc2.lastSet[0].H != 1 {
-		t.Errorf("new controller's SetKeys = %+v, want the pre-disconnect color replayed via rewire", fc2.lastSet)
+	if len(fc2.lastSet()) != 1 || fc2.lastSet()[0].H != 1 {
+		t.Errorf("new controller's SetKeys = %+v, want the pre-disconnect color replayed via rewire", fc2.lastSet())
 	}
 }

@@ -35,7 +35,7 @@ func main() {
 
 	registry := dispatcher.NewRegistry()
 	cache := dispatcher.NewCache()
-	disp := dispatcher.New(registry, cache, dispatcherQueueDepth)
+	disp := dispatcher.New(registry, cache, dispatcherQueueDepth, logger)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

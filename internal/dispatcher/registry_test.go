@@ -2,6 +2,7 @@ package dispatcher
 
 import (
 	"reflect"
+	"sync"
 	"testing"
 	"time"
 
@@ -10,23 +11,35 @@ import (
 	"github.com/seefood/blinkenkeys/internal/keyaddr"
 )
 
-// fakeController is reused by every test file in this package.
+// fakeController is reused by every test file in this package. It's
+// mutex-guarded because from Task 4 on, SetKeys runs on the dispatcher
+// goroutine asynchronously to the test.
 type fakeController struct {
 	numLEDs   uint16
 	positions map[uint16][2]uint8
-	lastSet   []hid.KeyColor
 	setErr    error
+
+	mu           sync.Mutex
+	sets         [][]hid.KeyColor
+	numLEDsCalls int
 }
 
 func (f *fakeController) SetKeys(keys []hid.KeyColor) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.setErr != nil {
 		return f.setErr
 	}
-	f.lastSet = keys
+	f.sets = append(f.sets, append([]hid.KeyColor(nil), keys...))
 	return nil
 }
 
-func (f *fakeController) GetNumberLEDs() (uint16, error) { return f.numLEDs, nil }
+func (f *fakeController) GetNumberLEDs() (uint16, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.numLEDsCalls++
+	return f.numLEDs, nil
+}
 
 func (f *fakeController) GetLEDInfo(index uint16) (uint8, uint8, error) {
 	pos := f.positions[index]
@@ -34,6 +47,28 @@ func (f *fakeController) GetLEDInfo(index uint16) (uint8, uint8, error) {
 }
 
 func (f *fakeController) Close() error { return nil }
+
+// lastSet returns the most recent SetKeys argument, or nil if none.
+func (f *fakeController) lastSet() []hid.KeyColor {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.sets) == 0 {
+		return nil
+	}
+	return f.sets[len(f.sets)-1]
+}
+
+func (f *fakeController) setCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.sets)
+}
+
+func (f *fakeController) capsQueries() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.numLEDsCalls
+}
 
 // registryWithConnected builds a Registry with one pre-seeded Connected slot
 // under exactly the given name, bypassing Reconcile's identity-based naming.
