@@ -51,18 +51,20 @@ on `SessionEnd`).
 
 ## `hooks-wezterm-pane.json`
 
-Everything `hooks-basic.json` does, plus a second write per event to a
-row-0 key addressed *directly* by matrix position (`R,C`), whose column is
-derived from WezTerm's `$WEZTERM_PANE` env var
+An alternative to `hooks-basic.json`, not an addition to it: instead of
+claiming a pooled key by `$CLAUDE_CODE_SESSION_ID`, each event writes
+directly (`R,C` addressing, no claim pool involved) to a row-0 key whose
+column is derived from WezTerm's `$WEZTERM_PANE` env var
 (`0,$(( WEZTERM_PANE % 4 ))` — `4` because the reference device has 4 keys
-in row 0; adjust to your own device's row-0 width). This gives you a
-second, per-*pane* indicator alongside the per-*session* one from
-`hooks-basic.json`: glance at row 0 to see which terminal tab has something
-going on, without needing to know which session claimed which pooled key.
+in row 0; adjust to your own device's row-0 width). One LED per terminal
+*pane* rather than per Claude Code *session* — restarting `claude` in the
+same pane reuses the same key instead of leaking a fresh pooled claim each
+time.
 
 Every pane command is guarded with `[ -n "$WEZTERM_PANE" ] && ...`, so
-outside WezTerm (SSH, tmux, a plain terminal) it's a silent no-op and only
-the row-1+ per-session behavior applies.
+outside WezTerm (SSH, tmux, a plain terminal) it's a silent no-op — nothing
+lights up. Without the guard, bash treats the unset var as `0` in
+arithmetic context and every session would collide on key `0,0`.
 
 Two things to know before using this one:
 
