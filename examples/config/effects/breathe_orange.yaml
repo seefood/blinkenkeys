@@ -1,0 +1,4 @@
+# Open-ended: breathes until superseded by the next command on the key.
+stages:
+  - primitive: breathe
+    settings: { color: orange, frequency_hz: 0.5, duty_cycle: 0.5 }

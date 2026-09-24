@@ -82,3 +82,24 @@ revises.
   not just V) was considered and set aside as a separate, larger primitive —
   `alternate` already covers "two colors" as a square wave. Deferred to a
   later phase's own brainstorm rather than folded into Phase 3.
+
+## Phase 5: named-key claim model (specced inline in the Phase 3 doc's "Named-key
+model" section)
+
+- **2026-09-24**: Implemented as specced, with one deliberate simplification:
+  the unclaimed-pool order is a flat ascending row/col scan (row 0 excluded,
+  reserved for direct addressing) rather than the spec's "pane/tab number →
+  matching key when in range, otherwise an overflow pool" scheme — terminal
+  tab/pane correlation is still unsolved (see `README.md` roadmap item 5), so
+  there was nothing for that ordering to key off of yet. Claims release via
+  `DELETE /devices/{name}/keys/{key-name}` or an idle sweep (default 8h,
+  `claims.idle_timeout` in `config.yaml`).
+- **2026-09-24**: Real hooks wired against this model on real hardware surfaced
+  that `examples/config/templates/claude.yaml`'s `waiting` state (previously a
+  static `#ffa500`) reads better folded into `timer5min` like `idle` — from a
+  prompt-cache-freshness standpoint, "blocked on a permission prompt" and
+  "turn ended, waiting for the next prompt" are the same case: no API call is
+  in flight, so the cache clock is ticking either way. `working` moved from
+  `breathe_blue` to a new `breathe_orange.yaml` (same `breathe` primitive,
+  `color: orange`); `breathe_blue.yaml` is left in place, now unreferenced, as
+  a `breathe`-primitive example.

@@ -1,7 +1,7 @@
 # Claude Code states, addressed as claude/<state>.
 working:
-  effect: breathe_blue
+  effect: breathe_orange
 idle:
   effect: timer5min
 waiting:
-  color: "#ffa500"
+  effect: timer5min

@@ -41,7 +41,7 @@ func TestLoadExamples(t *testing.T) {
 		t.Fatalf("claude/working = %+v, %v; want an effect", working, err)
 	}
 	if _, finite := working.Timeline.Total(); finite {
-		t.Error("claude/working (breathe_blue) should be open-ended")
+		t.Error("claude/working (breathe_orange) should be open-ended")
 	}
 	idle, err := lib.State("claude/idle")
 	if err != nil || idle.Timeline == nil {
@@ -51,8 +51,11 @@ func TestLoadExamples(t *testing.T) {
 		t.Errorf("claude/idle total = %v, want 5m", total)
 	}
 	waiting, err := lib.State("claude/waiting")
-	if err != nil || waiting.Color == nil {
-		t.Fatalf("claude/waiting = %+v, %v; want a color", waiting, err)
+	if err != nil || waiting.Timeline == nil {
+		t.Fatalf("claude/waiting = %+v, %v; want an effect (timer5min, same as idle)", waiting, err)
+	}
+	if total, _ := waiting.Timeline.Total(); total != 5*time.Minute {
+		t.Errorf("claude/waiting total = %v, want 5m", total)
 	}
 	if _, err := lib.Effect("timer5min"); err != nil {
 		t.Errorf("Effect(timer5min): %v", err)

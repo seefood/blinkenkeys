@@ -12,7 +12,8 @@ first place — but designed to generalize to any VialRGB-capable device.
 Language/implementation: **Go**. Specs:
 [Phases 1–2](docs/superpowers/specs/2026-09-21-blinkenkeys-phase1-2-design.md) (POC → MVP)
 and [Phase 3](docs/superpowers/specs/2026-09-24-blinkenkeys-phase3-effects-templates-design.md)
-(effects, templates, server-owned timers). Phase 5 is roadmap only; see
+(effects, templates, server-owned timers). Phase 5 (per-client key allocation) is
+also implemented, specced inline in Phase 3's "Named-key model" section; see
 `CHANGELOG.md` for design revisions.
 
 ## Scratching my itch
@@ -51,9 +52,12 @@ I'm planning to add templates to suport all sorts of use cases, please add your 
    `examples/config/`.
 4. *(Folded into Phase 3.)* Radius-based "explosion" / multi-key effects are on
    hold.
-5. **Per-client key allocation** — a subscriber (e.g. a coding agent instance) is
-   allocated a key and directs its own state to it. Open question, unsolved: how to
-   correlate a subscriber to a specific terminal tab (iTerm/WezTerm) automatically.
+5. **Per-client key allocation** — done. A subscriber (e.g. a coding agent
+   instance) is allocated a key by name and directs its own state to it; the
+   pool auto-assigns the next unclaimed key (ascending row/col order) and
+   releases on explicit `DELETE` or an idle timeout. Still open, unsolved: how
+   to correlate a subscriber to a specific terminal tab (iTerm/WezTerm)
+   automatically — today's allocation order has no notion of tabs/panes.
 6. *(Folded into Phase 3 — see item 3.)*
 
 Windows support is an open question intentionally left for a future community PR —
