@@ -67,9 +67,11 @@ not a replay.
 
 **Write path (`SetKey`), revised:**
 
-1. Resolve the device (name or ordinal, see §4) to a registry slot. No slot →
-   `ErrDeviceNotFound` (→ 404). This is now the only way `SetKey` fails at the
-   device level.
+1. Resolve the device (name or ordinal, see §4) to a registry slot. No slot —
+   never enumerated since startup and not declared in `config.yaml` →
+   `ErrDeviceNotFound` (→ 404), before any key-address resolution is attempted.
+   This is now the only way `SetKey` fails at the device level; the pending map
+   in step 2 exists only for config-declared devices.
 2. Resolve the key address (see §3) against the slot's capabilities. If
    capabilities aren't known yet (a pre-declared device that has never connected,
    §5), store the write in that device's **pending** map, keyed by the literal
