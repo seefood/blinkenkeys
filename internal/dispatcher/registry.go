@@ -7,7 +7,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/seefood/blinkenkeys/internal/color"
 	"github.com/seefood/blinkenkeys/internal/hid"
+	"github.com/seefood/blinkenkeys/internal/keyaddr"
 )
 
 // UntetheredMaxAge is how long a disconnected device's name/cache slot stays
@@ -34,6 +36,12 @@ type slot struct {
 	caps           *Capabilities  // nil until first fetched; survives Untethered
 	optional       bool           // config-declared optional: never evicted
 	pending        []PendingWrite // writes awaiting caps, in arrival order
+
+	// claims and owners are the named-key claim model (see claims.go): claims
+	// is name -> assignment, owners is index -> current owner. Kept in sync
+	// with each other under r.mu.
+	claims map[string]namedClaim
+	owners map[uint16]keyOwner
 }
 
 // PresentDevice pairs one currently-open device's resolved identity with its
@@ -161,12 +169,17 @@ func (r *Registry) CapsOrPend(name string, w PendingWrite) (caps Capabilities, p
 	return Capabilities{}, true, true
 }
 
-// SetCaps stores caps on name's slot and, if any writes were pending, passes
-// them to apply in arrival order before clearing them. apply runs while the
-// registry lock is still held: any Write that resolves against the new caps
-// must first acquire this lock in CapsOrPend, so it always lands in the
-// cache after the pending writes it supersedes. apply may be nil.
-func (r *Registry) SetCaps(name string, caps Capabilities, apply func([]PendingWrite)) {
+// SetCaps stores caps on name's slot and, if any writes were pending,
+// resolves each one (in arrival order) against the new caps before clearing
+// them: a resolved write is passed to apply as its (index, color); one that
+// can't resolve (e.g. now off the matrix) goes to dropped instead. A
+// resolved direct-form write is marked claimed-by-direct here, same as a
+// live Canonical call, releasing any name claim that held its index. Both
+// callbacks run while the registry lock is still held: any Write that
+// resolves against the new caps must first acquire this lock in CapsOrPend,
+// so it always lands in the cache after the pending writes it supersedes.
+// apply/dropped may be nil.
+func (r *Registry) SetCaps(name string, caps Capabilities, apply func(idx uint16, c color.HSV), dropped func(w PendingWrite, err error)) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	s, ok := r.slots[name]
@@ -174,8 +187,21 @@ func (r *Registry) SetCaps(name string, caps Capabilities, apply func([]PendingW
 		return
 	}
 	s.caps = &caps
-	if len(s.pending) > 0 && apply != nil {
-		apply(s.pending)
+	now := time.Now()
+	for _, w := range s.pending {
+		idx, err := resolveLocked(s, w.Addr, now)
+		if err != nil {
+			if dropped != nil {
+				dropped(w, err)
+			}
+			continue
+		}
+		if w.Addr.Kind != keyaddr.Name {
+			markDirectLocked(s, idx)
+		}
+		if apply != nil {
+			apply(idx, w.Color)
+		}
 	}
 	s.pending = nil
 }

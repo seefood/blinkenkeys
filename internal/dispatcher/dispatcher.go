@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/seefood/blinkenkeys/internal/color"
 	"github.com/seefood/blinkenkeys/internal/hid"
@@ -189,14 +190,12 @@ func (d *Dispatcher) tryEnqueue(j job) {
 // It never blocks and never waits on hardware: the cache is updated
 // synchronously (or, for a device whose capabilities aren't known yet, the
 // write is kept pending on its registry slot), and a colorless flush is
-// queued best-effort.
+// queued best-effort. A Name addr claims (or reuses) a key via the
+// registry's named-key pool — see Canonical, which does this ahead of Write
+// for the normal HTTP request path; Write only still needs to do it itself
+// for the rare pending write whose caps became known between Canonical and
+// Write.
 func (d *Dispatcher) Write(device string, addr keyaddr.Address, c color.HSV) error {
-	if addr.Kind == keyaddr.Name {
-		if _, _, exists := d.registry.Caps(device); !exists {
-			return ErrDeviceNotFound
-		}
-		return ErrNamedKeyUnsupported
-	}
 	caps, pended, exists := d.registry.CapsOrPend(device, PendingWrite{Addr: addr, Color: c})
 	if !exists {
 		return ErrDeviceNotFound
@@ -204,33 +203,81 @@ func (d *Dispatcher) Write(device string, addr keyaddr.Address, c color.HSV) err
 	if pended {
 		return nil
 	}
-	idx, ok := keyaddr.Resolve(addr, caps.LEDCount, caps.Positions)
-	if !ok {
-		return fmt.Errorf("%w: %s", ErrKeyNotFound, addr)
+	idx, err := d.resolve(device, addr, caps)
+	if err != nil {
+		return err
 	}
 	d.cache.Update(device, []hid.KeyColor{{Index: idx, H: c.H, S: c.S, V: c.V}})
 	d.tryEnqueue(job{kind: opFlush, device: device, index: idx})
 	return nil
 }
 
+// resolve maps addr to an LED index given device's known caps: a Name addr
+// claims (or reuses) a pooled key; any other form resolves against the
+// matrix as before. It never marks a key claimed-by-direct — only a caller
+// that still holds the address's original, pre-canonicalization kind (
+// Canonical; SetCaps's pending-write resolution) does that, since by the
+// time Write sees an addr it may already be the resolved led:N form of a
+// name claim.
+func (d *Dispatcher) resolve(device string, addr keyaddr.Address, caps Capabilities) (uint16, error) {
+	if addr.Kind == keyaddr.Name {
+		return d.registry.ClaimOrGet(device, addr.Name, time.Now())
+	}
+	idx, ok := keyaddr.Resolve(addr, caps.LEDCount, caps.Positions)
+	if !ok {
+		return 0, fmt.Errorf("%w: %s", ErrKeyNotFound, addr)
+	}
+	return idx, nil
+}
+
 // Canonical resolves addr to led:N when device's capabilities are known, so
-// every form naming one key maps to one effects-engine target. For a device
-// whose capabilities aren't known yet, addr is returned unchanged.
+// every form naming one key maps to one effects-engine target. A Name addr
+// claims (or reuses) a key from the device's named-key pool; any other form
+// marks its resolved index claimed-by-direct, releasing any name claim that
+// held it (see MarkDirect). For a device whose capabilities aren't known
+// yet, addr is returned unchanged (both kinds), and the pending-write path
+// (see Registry.SetCaps) handles it once caps arrive.
 func (d *Dispatcher) Canonical(device string, addr keyaddr.Address) (keyaddr.Address, error) {
 	caps, known, exists := d.registry.Caps(device)
-	switch {
-	case !exists:
+	if !exists {
 		return keyaddr.Address{}, ErrDeviceNotFound
-	case addr.Kind == keyaddr.Name:
-		return keyaddr.Address{}, ErrNamedKeyUnsupported
-	case !known:
+	}
+	if !known {
 		return addr, nil
+	}
+	if addr.Kind == keyaddr.Name {
+		idx, err := d.registry.ClaimOrGet(device, addr.Name, time.Now())
+		if err != nil {
+			return keyaddr.Address{}, err
+		}
+		return keyaddr.Address{Kind: keyaddr.LED, N: idx}, nil
 	}
 	idx, ok := keyaddr.Resolve(addr, caps.LEDCount, caps.Positions)
 	if !ok {
 		return keyaddr.Address{}, fmt.Errorf("%w: %s", ErrKeyNotFound, addr)
 	}
+	d.registry.MarkDirect(device, idx)
 	return keyaddr.Address{Kind: keyaddr.LED, N: idx}, nil
+}
+
+// ReleaseClaim releases name's claim on device, returning it to the pool.
+func (d *Dispatcher) ReleaseClaim(device, name string) error {
+	return d.registry.ReleaseClaim(device, name)
+}
+
+// RunClaimSweep releases every named claim whose last write is older than
+// maxAge, checking every interval, until ctx is canceled.
+func (d *Dispatcher) RunClaimSweep(ctx context.Context, interval, maxAge time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			d.registry.SweepIdleClaims(time.Now(), maxAge)
+		case <-ctx.Done():
+			return
+		}
+	}
 }
 
 // ResolveDevice maps a {name} path segment (name or ordinal) to a device name.
@@ -254,9 +301,15 @@ func (d *Dispatcher) fetchCapabilities(device string) (Capabilities, error) {
 	if err != nil {
 		return Capabilities{}, err
 	}
-	d.registry.SetCaps(device, caps, func(pending []PendingWrite) {
-		d.applyPending(device, caps, pending)
-	})
+	d.registry.SetCaps(device, caps,
+		func(idx uint16, c color.HSV) {
+			d.cache.Update(device, []hid.KeyColor{{Index: idx, H: c.H, S: c.S, V: c.V}})
+			d.tryEnqueue(job{kind: opFlush, device: device, index: idx})
+		},
+		func(w PendingWrite, err error) {
+			d.logger.Warn("dropping pending write", "device", device, "addr", w.Addr.String(), "err", err)
+		},
+	)
 	return caps, nil
 }
 
@@ -274,18 +327,4 @@ func queryCapabilities(ctrl hid.Controller) (Capabilities, error) {
 		caps.Positions = append(caps.Positions, LEDPosition{Index: i, Row: row, Col: col})
 	}
 	return caps, nil
-}
-
-// applyPending resolves pending writes (arrival order, so the latest write
-// per key wins) into the cache. Called by Registry.SetCaps under its lock.
-func (d *Dispatcher) applyPending(device string, caps Capabilities, pending []PendingWrite) {
-	for _, w := range pending {
-		idx, ok := keyaddr.Resolve(w.Addr, caps.LEDCount, caps.Positions)
-		if !ok {
-			d.logger.Warn("dropping pending write: key not on device", "device", device, "addr", w.Addr.String())
-			continue
-		}
-		d.cache.Update(device, []hid.KeyColor{{Index: idx, H: w.Color.H, S: w.Color.S, V: w.Color.V}})
-		d.tryEnqueue(job{kind: opFlush, device: device, index: idx})
-	}
 }

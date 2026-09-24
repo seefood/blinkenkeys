@@ -25,6 +25,8 @@ type fakeDispatcher struct {
 	listErr    error
 	caps       dispatcher.Capabilities
 	capsErr    error
+	releaseErr error
+	released   []string // device+"/"+name for each ReleaseClaim call
 }
 
 func (f *fakeDispatcher) ResolveDevice(ref string) (string, bool) {
@@ -45,6 +47,11 @@ func (f *fakeDispatcher) ListDevices(context.Context) ([]dispatcher.DeviceSummar
 
 func (f *fakeDispatcher) GetCapabilities(context.Context, string) (dispatcher.Capabilities, error) {
 	return f.caps, f.capsErr
+}
+
+func (f *fakeDispatcher) ReleaseClaim(device, name string) error {
+	f.released = append(f.released, device+"/"+name)
+	return f.releaseErr
 }
 
 type fakeWriter struct {
@@ -152,7 +159,7 @@ func TestPutStatusTable(t *testing.T) {
 		{"unknown device", knownPad(), &fakeLibrary{}, nil, "/devices/nope/keys/0,0", `{"color":"red"}`, 404},
 		{"ordinal out of range", knownPad(), &fakeLibrary{}, nil, "/devices/5/keys/0,0", `{"color":"red"}`, 404},
 		{"malformed pos", knownPad(), &fakeLibrary{}, nil, "/devices/0/keys/1,x", `{"color":"red"}`, 400},
-		{"named key", knownPad(), &fakeLibrary{}, nil, "/devices/0/keys/esc", `{"color":"red"}`, 501},
+		{"named key", knownPad(), &fakeLibrary{}, nil, "/devices/0/keys/esc", `{"color":"red"}`, 204},
 		{"key off matrix", &fakeDispatcher{devices: map[string]string{"0": "a"}, canonErr: dispatcher.ErrKeyNotFound}, &fakeLibrary{}, nil, "/devices/0/keys/9,9", `{"color":"red"}`, 404},
 		{"malformed json", knownPad(), &fakeLibrary{}, nil, "/devices/0/keys/0,0", `{`, 400},
 		{"unknown body field", knownPad(), &fakeLibrary{}, nil, "/devices/0/keys/0,0", `{"colour":"red"}`, 400},
@@ -167,6 +174,45 @@ func TestPutStatusTable(t *testing.T) {
 	for _, tt := range tests {
 		h := NewHandler(tt.disp, &fakeWriter{err: tt.werr}, tt.lib)
 		if rec := put(t, h, tt.path, tt.body); rec.Code != tt.want {
+			t.Errorf("%s: status = %d, want %d; body %s", tt.name, rec.Code, tt.want, rec.Body)
+		}
+	}
+}
+
+func del(t *testing.T, h *Handler, path string) *httptest.ResponseRecorder {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	h.Routes().ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, path, nil))
+	return rec
+}
+
+func TestDeleteReleasesNamedKey(t *testing.T) {
+	disp := knownPad()
+	h := NewHandler(disp, &fakeWriter{}, &fakeLibrary{})
+	rec := del(t, h, "/devices/0/keys/esc")
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d; body %s", rec.Code, rec.Body)
+	}
+	if len(disp.released) != 1 || disp.released[0] != "uid-01/esc" {
+		t.Errorf("ReleaseClaim calls = %v", disp.released)
+	}
+}
+
+func TestDeleteStatusTable(t *testing.T) {
+	tests := []struct {
+		name string
+		disp *fakeDispatcher
+		path string
+		want int
+	}{
+		{"unknown device", knownPad(), "/devices/nope/keys/esc", 404},
+		{"direct address not a name", knownPad(), "/devices/0/keys/2,2", 400},
+		{"malformed pos", knownPad(), "/devices/0/keys/1,x", 400},
+		{"no claim under that name", &fakeDispatcher{devices: map[string]string{"0": "a"}, releaseErr: dispatcher.ErrClaimNotFound}, "/devices/0/keys/esc", 404},
+	}
+	for _, tt := range tests {
+		h := NewHandler(tt.disp, &fakeWriter{}, &fakeLibrary{})
+		if rec := del(t, h, tt.path); rec.Code != tt.want {
 			t.Errorf("%s: status = %d, want %d; body %s", tt.name, rec.Code, tt.want, rec.Body)
 		}
 	}

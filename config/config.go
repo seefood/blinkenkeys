@@ -9,15 +9,40 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/goccy/go-yaml"
 )
+
+// DefaultClaimIdleTimeout is claims.idle_timeout's value when config.yaml
+// doesn't set one.
+const DefaultClaimIdleTimeout = "8h"
 
 // Config is blinkenkeysd's on-disk configuration.
 type Config struct {
 	Naming    NamingRule   `yaml:"naming"`
 	Listeners Listeners    `yaml:"listeners"`
 	Devices   []DeviceDecl `yaml:"devices"`
+	Claims    ClaimsConfig `yaml:"claims"`
+}
+
+// ClaimsConfig configures the named-key claim pool (see
+// dispatcher.RunClaimSweep).
+type ClaimsConfig struct {
+	IdleTimeout string `yaml:"idle_timeout"` // Go duration string, e.g. "8h"; "" = DefaultClaimIdleTimeout
+}
+
+// ClaimIdleTimeout returns Claims.IdleTimeout parsed as a time.Duration,
+// falling back to DefaultClaimIdleTimeout when unset. Load has already
+// validated the string parses, so the error return here is unreachable in
+// practice.
+func (c *Config) ClaimIdleTimeout() time.Duration {
+	s := c.Claims.IdleTimeout
+	if s == "" {
+		s = DefaultClaimIdleTimeout
+	}
+	d, _ := time.ParseDuration(s)
+	return d
 }
 
 // DeviceDecl is one devices: entry. ID is the device name blinkenkeysd
@@ -90,6 +115,11 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.Listeners.TCP != nil && cfg.Listeners.TCP.Token == "" {
 		return nil, fmt.Errorf("config: listeners.tcp.token is required whenever listeners.tcp is set")
+	}
+	if cfg.Claims.IdleTimeout != "" {
+		if _, err := time.ParseDuration(cfg.Claims.IdleTimeout); err != nil {
+			return nil, fmt.Errorf("config: claims.idle_timeout %q: %w", cfg.Claims.IdleTimeout, err)
+		}
 	}
 	seen := make(map[string]bool, len(cfg.Devices))
 	for i, d := range cfg.Devices {

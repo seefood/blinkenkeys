@@ -95,6 +95,7 @@ func main() {
 
 	go pollForDevices(ctx, state, registry, cache, disp, logger)
 	go disp.RunPeriodicRedraw(ctx, dispatcher.RedrawInterval)
+	go disp.RunClaimSweep(ctx, dispatcher.ClaimSweepInterval, cfg.ClaimIdleTimeout())
 
 	engine := effects.NewEngine(disp, logger)
 	go engine.Run(ctx, effects.TickInterval)

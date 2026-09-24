@@ -24,7 +24,7 @@ func withCaps(r *Registry, name string, n int) *Registry {
 	for i := 0; i < n; i++ {
 		caps.Positions = append(caps.Positions, LEDPosition{Index: uint16(i), Row: 0, Col: uint8(i)})
 	}
-	r.SetCaps(name, caps, nil)
+	r.SetCaps(name, caps, nil, nil)
 	return r
 }
 
@@ -57,10 +57,30 @@ func TestWriteUnknownDevice(t *testing.T) {
 	}
 }
 
-func TestWriteNamedKeyUnsupported(t *testing.T) {
-	d := New(withCaps(registryWithConnected("a", &fakeController{}), "a", 4), NewCache(), 8, discardLogger())
-	if err := d.Write("a", keyaddr.Address{Kind: keyaddr.Name, Name: "esc"}, color.HSV{}); !errors.Is(err, ErrNamedKeyUnsupported) {
-		t.Errorf("err = %v, want ErrNamedKeyUnsupported", err)
+func TestWriteNamedKeyClaimsAndReuses(t *testing.T) {
+	fc := twoKeyPad()
+	cache := NewCache()
+	d := New(registryWithConnected("a", fc), cache, 8, discardLogger())
+	runDispatcher(t, d)
+	if _, err := d.GetCapabilities(context.Background(), "a"); err != nil {
+		t.Fatalf("GetCapabilities: %v", err)
+	}
+
+	esc := keyaddr.Address{Kind: keyaddr.Name, Name: "esc"}
+	if err := d.Write("a", esc, color.HSV{H: 1}); err != nil {
+		t.Fatalf("Write(esc): %v", err)
+	}
+	if k, ok := cache.Get("a", 0); !ok || k.H != 1 {
+		t.Errorf("cache LED 0 = %+v, %v, want claimed esc key H=1", k, ok)
+	}
+	if err := d.Write("a", esc, color.HSV{H: 2}); err != nil {
+		t.Fatalf("Write(esc) again: %v", err)
+	}
+	if k, ok := cache.Get("a", 0); !ok || k.H != 2 {
+		t.Errorf("cache LED 0 = %+v, %v, want reused esc key H=2 (same index)", k, ok)
+	}
+	if _, ok := cache.Get("a", 1); ok {
+		t.Error("LED 1 written, want repeated esc write to reuse the same key")
 	}
 }
 
@@ -230,8 +250,26 @@ func TestCanonical(t *testing.T) {
 	if _, err := d.Canonical("a", led(9)); !errors.Is(err, ErrKeyNotFound) {
 		t.Errorf("off matrix: err = %v", err)
 	}
-	if _, err := d.Canonical("a", keyaddr.Address{Kind: keyaddr.Name, Name: "x"}); !errors.Is(err, ErrNamedKeyUnsupported) {
-		t.Errorf("name: err = %v", err)
+	if _, err := d.Canonical("a", keyaddr.Address{Kind: keyaddr.Name, Name: "x"}); !errors.Is(err, ErrNoUnclaimedKeys) {
+		t.Errorf("name with no eligible keys (row 0 only): err = %v, want ErrNoUnclaimedKeys", err)
+	}
+}
+
+func TestCanonicalNamedKey(t *testing.T) {
+	reg := registryWithConnected("a", twoKeyPad())
+	d := New(reg, NewCache(), 8, discardLogger())
+	runDispatcher(t, d)
+	if _, err := d.GetCapabilities(context.Background(), "a"); err != nil {
+		t.Fatalf("GetCapabilities: %v", err)
+	}
+
+	esc := keyaddr.Address{Kind: keyaddr.Name, Name: "esc"}
+	got, err := d.Canonical("a", esc)
+	if err != nil || got != led(0) {
+		t.Fatalf("Canonical(a, esc) = %v, %v; want led:0 (first eligible key)", got, err)
+	}
+	if got2, err := d.Canonical("a", esc); err != nil || got2 != got {
+		t.Errorf("Canonical(a, esc) again = %v, %v; want same claim %v", got2, err, got)
 	}
 }
 

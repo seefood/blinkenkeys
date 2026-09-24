@@ -24,6 +24,7 @@ type Dispatcher interface {
 	Canonical(device string, addr keyaddr.Address) (keyaddr.Address, error)
 	ListDevices(ctx context.Context) ([]dispatcher.DeviceSummary, error)
 	GetCapabilities(ctx context.Context, device string) (dispatcher.Capabilities, error)
+	ReleaseClaim(device, name string) error
 }
 
 // Writer is the effects engine: the only write path, so supersession is
@@ -57,6 +58,7 @@ func NewHandler(disp Dispatcher, w Writer, lib Library) *Handler {
 func (h *Handler) Routes() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("PUT /devices/{name}/keys/{pos}", h.writeKey)
+	mux.HandleFunc("DELETE /devices/{name}/keys/{pos}", h.releaseKey)
 	mux.HandleFunc("GET /devices", h.listDevices)
 	mux.HandleFunc("GET /devices/{name}", h.getCapabilities)
 	return mux
@@ -84,10 +86,6 @@ func (h *Handler) writeKey(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	if addr.Kind == keyaddr.Name {
-		writeError(w, http.StatusNotImplemented, fmt.Errorf("api: named keys (%q) are not implemented yet; use R,C, led:N or idx:N", addr.Name))
-		return
-	}
 	addr, err = h.disp.Canonical(device, addr)
 	if err != nil {
 		writeError(w, statusFor(err), err)
@@ -99,6 +97,31 @@ func (h *Handler) writeKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.apply(effects.Target{Device: device, Addr: addr}, body); err != nil {
+		writeError(w, statusFor(err), err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// releaseKey releases a named key's claim, returning it to the device's
+// unclaimed pool. Only a Name {pos} is accepted — a direct (R,C/led:/idx:)
+// address has no name to release by.
+func (h *Handler) releaseKey(w http.ResponseWriter, r *http.Request) {
+	device, ok := h.disp.ResolveDevice(r.PathValue("name"))
+	if !ok {
+		writeError(w, http.StatusNotFound, fmt.Errorf("%w %q", dispatcher.ErrDeviceNotFound, r.PathValue("name")))
+		return
+	}
+	addr, err := keyaddr.Parse(r.PathValue("pos"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if addr.Kind != keyaddr.Name {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("%w: release requires a key name, got %q", errBadRequest, addr))
+		return
+	}
+	if err := h.disp.ReleaseClaim(device, addr.Name); err != nil {
 		writeError(w, statusFor(err), err)
 		return
 	}
@@ -156,11 +179,12 @@ func statusFor(err error) int {
 	switch {
 	case errors.Is(err, dispatcher.ErrDeviceNotFound),
 		errors.Is(err, dispatcher.ErrKeyNotFound),
+		errors.Is(err, dispatcher.ErrClaimNotFound),
 		errors.Is(err, effects.ErrUnknownEffect),
 		errors.Is(err, effects.ErrUnknownState):
 		return http.StatusNotFound
-	case errors.Is(err, dispatcher.ErrNamedKeyUnsupported):
-		return http.StatusNotImplemented
+	case errors.Is(err, dispatcher.ErrNoUnclaimedKeys):
+		return http.StatusConflict
 	case errors.Is(err, errBadRequest),
 		errors.Is(err, keyaddr.ErrInvalid):
 		return http.StatusBadRequest

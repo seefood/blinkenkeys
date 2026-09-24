@@ -254,19 +254,31 @@ func TestRegistryCapsOrPendAndSetCaps(t *testing.T) {
 		t.Error("CapsOrPend(missing) exists = true")
 	}
 
-	var got []PendingWrite
-	r.SetCaps("a", Capabilities{LEDCount: 2}, func(p []PendingWrite) { got = p })
-	want := []PendingWrite{{b, color.HSV{H: 2}}, {a, color.HSV{H: 3}}} // a moved to the end
+	caps := Capabilities{LEDCount: 2, Positions: []LEDPosition{{Index: 0, Row: 0, Col: 0}, {Index: 1, Row: 1, Col: 1}}}
+	type resolvedWrite struct {
+		idx uint16
+		c   color.HSV
+	}
+	var got []resolvedWrite
+	var dropped []PendingWrite
+	r.SetCaps("a", caps,
+		func(idx uint16, c color.HSV) { got = append(got, resolvedWrite{idx, c}) },
+		func(w PendingWrite, _ error) { dropped = append(dropped, w) },
+	)
+	want := []resolvedWrite{{0, color.HSV{H: 2}}, {1, color.HSV{H: 3}}} // b (LED 0), then a moved to the end (RowCol 1,1 -> LED 1)
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("apply got %+v, want %+v", got, want)
 	}
+	if len(dropped) != 0 {
+		t.Errorf("dropped = %+v, want none", dropped)
+	}
 
-	caps, pended, _ := r.CapsOrPend("a", PendingWrite{Addr: a})
-	if pended || caps.LEDCount != 2 {
-		t.Errorf("CapsOrPend after SetCaps = %+v pended=%v", caps, pended)
+	caps2, pended, _ := r.CapsOrPend("a", PendingWrite{Addr: a})
+	if pended || caps2.LEDCount != 2 {
+		t.Errorf("CapsOrPend after SetCaps = %+v pended=%v", caps2, pended)
 	}
 	called := false
-	r.SetCaps("a", Capabilities{LEDCount: 2}, func([]PendingWrite) { called = true })
+	r.SetCaps("a", caps, func(uint16, color.HSV) { called = true }, nil)
 	if called {
 		t.Error("apply called with no pending writes")
 	}
@@ -277,7 +289,7 @@ func TestRegistryCapsRetainedWhenUntethered(t *testing.T) {
 	name := hid.BaseName(id)
 	r := NewRegistry()
 	r.Reconcile([]PresentDevice{{Identity: id, Ctrl: &fakeController{}}}, time.Now(), UntetheredMaxAge)
-	r.SetCaps(name, Capabilities{LEDCount: 4}, nil)
+	r.SetCaps(name, Capabilities{LEDCount: 4}, nil, nil)
 	r.Reconcile(nil, time.Now(), UntetheredMaxAge)
 
 	caps, known, exists := r.Caps(name)
@@ -329,7 +341,7 @@ func TestRegistrySummariesSorted(t *testing.T) {
 func TestRegistryConnectedWithoutCaps(t *testing.T) {
 	r := registryWithConnectedMulti(map[string]hid.Controller{"a": &fakeController{}, "b": &fakeController{}})
 	r.Declare("c") // untethered: excluded
-	r.SetCaps("a", Capabilities{LEDCount: 1}, nil)
+	r.SetCaps("a", Capabilities{LEDCount: 1}, nil, nil)
 	if got := r.ConnectedWithoutCaps(); !reflect.DeepEqual(got, []string{"b"}) {
 		t.Errorf("ConnectedWithoutCaps = %v, want [b]", got)
 	}
