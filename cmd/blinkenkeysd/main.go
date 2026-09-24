@@ -40,7 +40,7 @@ func main() {
 		home = "."
 	}
 	cfgDir := config.Dir(os.Getenv, home)
-	cfg, _, err := loadAll(cfgDir)
+	cfg, lib, err := loadAll(cfgDir)
 	if *checkOnly {
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
@@ -83,8 +83,9 @@ func main() {
 	go pollForDevices(ctx, state, registry, cache, disp, logger)
 	go disp.RunPeriodicRedraw(ctx, dispatcher.RedrawInterval)
 
-	caps := api.NewCapabilitiesCache(disp)
-	handler := api.NewHandler(disp, caps)
+	engine := effects.NewEngine(disp, logger)
+	go engine.Run(ctx, effects.TickInterval)
+	handler := api.NewHandler(disp, engine, lib)
 
 	socketPath := resolveSocketPath(os.Getenv("BLINKENKEYS_SOCKET"), cfg.Listeners.Socket.Path, home)
 	if err := os.MkdirAll(filepath.Dir(socketPath), 0o700); err != nil {

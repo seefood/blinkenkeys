@@ -238,12 +238,6 @@ func (d *Dispatcher) ResolveDevice(ref string) (string, bool) {
 	return d.registry.ResolveDevice(ref)
 }
 
-// SetKey is a temporary adapter that keeps internal/api's Phase 1+2 handler
-// compiling until it switches to the effects engine; deleted then.
-func (d *Dispatcher) SetKey(_ context.Context, device string, index uint16, h, s, v uint8) error {
-	return d.Write(device, keyaddr.Address{Kind: keyaddr.LED, N: index}, color.HSV{H: h, S: s, V: v})
-}
-
 // fetchCapabilities runs on the dispatcher goroutine. It re-checks for
 // stored caps (a concurrent request may have fetched them since this job
 // was queued), else queries the device and stores the result, resolving
