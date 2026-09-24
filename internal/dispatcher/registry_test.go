@@ -15,9 +15,10 @@ import (
 // mutex-guarded because from Task 4 on, SetKeys runs on the dispatcher
 // goroutine asynchronously to the test.
 type fakeController struct {
-	numLEDs   uint16
-	positions map[uint16][2]uint8
-	setErr    error
+	numLEDs    uint16
+	positions  map[uint16][2]uint8
+	setErr     error
+	numLEDsErr error
 
 	mu           sync.Mutex
 	sets         [][]hid.KeyColor
@@ -38,6 +39,9 @@ func (f *fakeController) GetNumberLEDs() (uint16, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.numLEDsCalls++
+	if f.numLEDsErr != nil {
+		return 0, f.numLEDsErr
+	}
 	return f.numLEDs, nil
 }
 
@@ -344,5 +348,44 @@ func TestRegistryConnectedWithoutCaps(t *testing.T) {
 	r.SetCaps("a", Capabilities{LEDCount: 1}, nil, nil)
 	if got := r.ConnectedWithoutCaps(); !reflect.DeepEqual(got, []string{"b"}) {
 		t.Errorf("ConnectedWithoutCaps = %v, want [b]", got)
+	}
+}
+
+func TestRegistryRecordCapsFailureMarksUnsupportedAfterThreshold(t *testing.T) {
+	r := registryWithConnected("a", &fakeController{})
+	for i := 0; i < maxCapsFailures; i++ {
+		r.RecordCapsFailure("a")
+	}
+	if got := r.ConnectedWithoutCaps(); len(got) != 0 {
+		t.Errorf("ConnectedWithoutCaps = %v, want none once marked unsupported", got)
+	}
+	if got := r.Summaries(); len(got) != 0 {
+		t.Errorf("Summaries = %v, want unsupported device hidden", got)
+	}
+	if _, ok := r.ResolveDevice("a"); ok {
+		t.Error("ResolveDevice(\"a\"): want false for unsupported device")
+	}
+}
+
+func TestRegistryRecordCapsFailureBelowThresholdStaysVisible(t *testing.T) {
+	r := registryWithConnected("a", &fakeController{})
+	for i := 0; i < maxCapsFailures-1; i++ {
+		r.RecordCapsFailure("a")
+	}
+	if got := r.ConnectedWithoutCaps(); !reflect.DeepEqual(got, []string{"a"}) {
+		t.Errorf("ConnectedWithoutCaps = %v, want [a] below threshold", got)
+	}
+	if got := r.Summaries(); len(got) != 1 {
+		t.Errorf("Summaries = %v, want device still visible below threshold", got)
+	}
+}
+
+func TestRegistryResolveDeviceOrdinalSkipsUnsupported(t *testing.T) {
+	r := registryWithConnectedMulti(map[string]hid.Controller{"a": &fakeController{}, "b": &fakeController{}})
+	for i := 0; i < maxCapsFailures; i++ {
+		r.RecordCapsFailure("a")
+	}
+	if name, ok := r.ResolveDevice("0"); !ok || name != "b" {
+		t.Errorf(`ResolveDevice("0") = %q, %v, want "b", true`, name, ok)
 	}
 }

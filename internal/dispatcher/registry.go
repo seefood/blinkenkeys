@@ -17,6 +17,14 @@ import (
 // the design spec's "State persistence & refresh" untethered-rewire note.
 const UntetheredMaxAge = 24 * time.Hour
 
+// maxCapsFailures is how many consecutive capability-fetch failures a
+// Connected device tolerates before RecordCapsFailure marks it unsupported.
+// A board that answers Vial's raw-HID vendor interface (usage page 0xFF60 /
+// usage 0x61 — see internal/hid's filterVial) but never validly responds to
+// VialRGB's GetNumberLEDs simply doesn't implement VialRGB; retrying it
+// forever every poll only spams the device and the log.
+const maxCapsFailures = 3
+
 type slotState int
 
 const (
@@ -36,6 +44,8 @@ type slot struct {
 	caps           *Capabilities  // nil until first fetched; survives Untethered
 	optional       bool           // config-declared optional: never evicted
 	pending        []PendingWrite // writes awaiting caps, in arrival order
+	capsFailures   int            // consecutive GetCapabilities failures; see RecordCapsFailure
+	unsupported    bool           // set once capsFailures reaches maxCapsFailures: not VialRGB-capable
 
 	// claims and owners are the named-key claim model (see claims.go): claims
 	// is name -> assignment, owners is index -> current owner. Kept in sync
@@ -95,12 +105,14 @@ func (r *Registry) Get(name string) (hid.Controller, bool) {
 
 // Summaries lists every known device, Connected or Untethered (including
 // declared, never-seen ones), sorted by name — list position is the
-// device's ordinal (see ResolveDevice).
+// device's ordinal (see ResolveDevice). A device RecordCapsFailure marked
+// unsupported is omitted: blinkenkeysd can never light it up, so listing it
+// would only mislead a client into trying.
 func (r *Registry) Summaries() []DeviceSummary {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	out := make([]DeviceSummary, 0, len(r.slots))
-	for _, name := range r.sortedNamesLocked() {
+	for _, name := range r.visibleNamesLocked() {
 		out = append(out, DeviceSummary{Name: name, Connected: r.slots[name].state == stateConnected})
 	}
 	return out
@@ -113,6 +125,20 @@ func (r *Registry) sortedNamesLocked() []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+// visibleNamesLocked is sortedNamesLocked with unsupported slots filtered
+// out — the ordering Summaries and ResolveDevice's ordinal lookup both use,
+// so list position stays consistent between the two.
+func (r *Registry) visibleNamesLocked() []string {
+	names := r.sortedNamesLocked()
+	out := make([]string, 0, len(names))
+	for _, name := range names {
+		if !r.slots[name].unsupported {
+			out = append(out, name)
+		}
+	}
+	return out
 }
 
 // Declare creates an Untethered, eviction-exempt slot named id with base
@@ -207,19 +233,21 @@ func (r *Registry) SetCaps(name string, caps Capabilities, apply func(idx uint16
 }
 
 // ResolveDevice maps a {name} path segment to a slot name: either an exact
-// name, or a numeric ordinal — the rank among all slots sorted by name,
-// computed fresh on each call (so not stable across topology changes).
+// name, or a numeric ordinal — the rank among all visible slots sorted by
+// name, computed fresh on each call (so not stable across topology
+// changes). A device RecordCapsFailure marked unsupported resolves to
+// neither form, the same as if it were never enumerated.
 func (r *Registry) ResolveDevice(ref string) (string, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if _, ok := r.slots[ref]; ok {
+	if s, ok := r.slots[ref]; ok && !s.unsupported {
 		return ref, true
 	}
 	n, err := strconv.ParseUint(ref, 10, 31)
 	if err != nil {
 		return "", false
 	}
-	names := r.sortedNamesLocked()
+	names := r.visibleNamesLocked()
 	if int(n) >= len(names) {
 		return "", false
 	}
@@ -227,19 +255,40 @@ func (r *Registry) ResolveDevice(ref string) (string, bool) {
 }
 
 // ConnectedWithoutCaps lists Connected slots whose capabilities were never
-// fetched (new, or whose earlier fetch failed), sorted by name — the poll
-// loop retries EnsureCapabilities for each on every cycle.
+// fetched (new, or whose earlier fetch failed fewer than maxCapsFailures
+// times), sorted by name — the poll loop retries EnsureCapabilities for each
+// on every cycle. A slot RecordCapsFailure has marked unsupported is
+// excluded, so the poll loop stops retrying it.
 func (r *Registry) ConnectedWithoutCaps() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	var out []string
 	for _, name := range r.sortedNamesLocked() {
 		s := r.slots[name]
-		if s.state == stateConnected && s.caps == nil {
+		if s.state == stateConnected && s.caps == nil && !s.unsupported {
 			out = append(out, name)
 		}
 	}
 	return out
+}
+
+// RecordCapsFailure counts one failed capability fetch for name and, once
+// consecutive failures reach maxCapsFailures, marks the slot unsupported —
+// see the maxCapsFailures doc comment for why a device only ever reaches
+// this via repeated failure, never a single one. A no-op if name has no
+// slot (defensive: the caller already checked Registry.Get before querying
+// hardware).
+func (r *Registry) RecordCapsFailure(name string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	s, ok := r.slots[name]
+	if !ok {
+		return
+	}
+	s.capsFailures++
+	if s.capsFailures >= maxCapsFailures {
+		s.unsupported = true
+	}
 }
 
 // Reconcile resolves present's identities to names for one poll cycle: a

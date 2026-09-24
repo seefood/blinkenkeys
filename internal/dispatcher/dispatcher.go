@@ -301,6 +301,7 @@ func (d *Dispatcher) fetchCapabilities(device string) (Capabilities, error) {
 	}
 	caps, err := queryCapabilities(ctrl)
 	if err != nil {
+		d.registry.RecordCapsFailure(device)
 		return Capabilities{}, err
 	}
 	d.registry.SetCaps(device, caps,

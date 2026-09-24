@@ -70,6 +70,25 @@ func TestGetCapabilitiesUnknownForDeclared(t *testing.T) {
 	}
 }
 
+func TestGetCapabilitiesMarksUnsupportedAfterRepeatedFailures(t *testing.T) {
+	fc := &fakeController{numLEDsErr: errors.New("not vialrgb")}
+	reg := registryWithConnected("a", fc)
+	d := New(reg, NewCache(), 8, discardLogger())
+	runDispatcher(t, d)
+
+	for i := 0; i < maxCapsFailures; i++ {
+		if _, err := d.GetCapabilities(context.Background(), "a"); err == nil {
+			t.Fatalf("GetCapabilities #%d: want error", i)
+		}
+	}
+	if got := reg.ConnectedWithoutCaps(); len(got) != 0 {
+		t.Errorf("ConnectedWithoutCaps = %v, want none after repeated caps failures", got)
+	}
+	if got := reg.Summaries(); len(got) != 0 {
+		t.Errorf("Summaries = %v, want device hidden after repeated caps failures", got)
+	}
+}
+
 func TestGetCapabilitiesUnknownDevice(t *testing.T) {
 	d := New(NewRegistry(), NewCache(), 8, discardLogger()) // Run not started: must not need the queue
 	if _, err := d.GetCapabilities(context.Background(), "missing"); !errors.Is(err, ErrDeviceNotFound) {
