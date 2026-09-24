@@ -5,7 +5,11 @@
 // concurrent access to the same handle.
 package dispatcher
 
-import "errors"
+import (
+	"errors"
+
+	"github.com/seefood/blinkenkeys/internal/keyaddr"
+)
 
 // ErrDeviceNotFound is returned for a device name not present in the
 // registry — internal/api maps this to a 404.
@@ -21,13 +25,8 @@ type DeviceSummary struct {
 	Connected bool   `json:"connected"`
 }
 
-// LEDPosition is one LED's matrix location, as reported by VialRGB's
-// VIALRGB_GET_LED_INFO.
-type LEDPosition struct {
-	Index uint16 `json:"index"`
-	Row   uint8  `json:"row"`
-	Col   uint8  `json:"col"`
-}
+// LEDPosition is one LED's matrix location — see keyaddr.Position.
+type LEDPosition = keyaddr.Position
 
 // Capabilities is GetCapabilities's result.
 type Capabilities struct {

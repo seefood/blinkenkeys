@@ -120,3 +120,14 @@ func minu8(a, b, c uint8) uint8 {
 	}
 	return m
 }
+
+// HSV is one QMK-native color: each channel 0-255.
+type HSV struct {
+	H, S, V uint8
+}
+
+// ParseHSV is Parse returning an HSV value.
+func ParseHSV(s string) (HSV, error) {
+	h, sat, v, err := Parse(s)
+	return HSV{H: h, S: sat, V: v}, err
+}

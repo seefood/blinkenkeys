@@ -40,3 +40,16 @@ func TestParse(t *testing.T) {
 		})
 	}
 }
+
+func TestParseHSV(t *testing.T) {
+	got, err := ParseHSV("#ff0000")
+	if err != nil {
+		t.Fatalf("ParseHSV: %v", err)
+	}
+	if got != (HSV{H: 0, S: 255, V: 255}) {
+		t.Errorf("ParseHSV(#ff0000) = %+v", got)
+	}
+	if _, err := ParseHSV("not-a-color"); err == nil {
+		t.Error("ParseHSV(not-a-color): want error")
+	}
+}
