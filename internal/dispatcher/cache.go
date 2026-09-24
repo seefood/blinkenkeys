@@ -24,7 +24,8 @@ func NewCache() *Cache {
 	return &Cache{byDevice: make(map[string]map[uint16]hid.KeyColor)}
 }
 
-// Update records keys as the last color successfully written to device.
+// Update records keys as device's desired color (frame buffer), regardless
+// of whether a hardware write ever succeeds.
 func (c *Cache) Update(device string, keys []hid.KeyColor) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

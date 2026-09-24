@@ -81,7 +81,15 @@ func (e *Engine) Tick(now time.Time) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	for t, r := range e.running {
-		c, done := r.tl.At(now.Sub(r.start))
+		elapsed := now.Sub(r.start)
+		if elapsed < 0 {
+			// Start's now (captured before it takes e.mu) can be a hair
+			// after this tick's now if the two race; clamp instead of
+			// handing Timeline.At a negative duration, which would wrap to
+			// just before the end of the timeline.
+			elapsed = 0
+		}
+		c, done := r.tl.At(elapsed)
 		if done || c != r.last {
 			if err := e.out.Write(t.Device, t.Addr, c); err != nil {
 				e.logger.Warn("effect write failed; stopping effect", "device", t.Device, "addr", t.Addr.String(), "err", err)

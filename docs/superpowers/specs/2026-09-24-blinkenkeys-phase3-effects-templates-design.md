@@ -376,6 +376,11 @@ devices:
 
 ### 6. Config wiring
 
+> Revised post-implementation: the `$BLINKENKEYS_CONFIG_DIR` / `BLINKENKEYS_SOCKET`
+> env vars described below were replaced with a `-config` CLI flag and
+> `config.yaml`'s `listeners.socket.path` — see CHANGELOG.md's 2026-09-24
+> "Post-implementation revision" entry for the reasoning.
+
 - Config dir: `$BLINKENKEYS_CONFIG_DIR` if set, else
   `${XDG_CONFIG_HOME:-$HOME/.config}/blinkenkeys`. It contains `config.yaml`,
   `effects/`, and `templates/`.

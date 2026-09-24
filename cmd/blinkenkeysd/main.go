@@ -40,9 +40,14 @@ func main() {
 	if err != nil {
 		home = "."
 	}
-	cfgDir := *configDirFlag
-	if cfgDir == "" {
-		cfgDir = config.Dir(os.Getenv, home)
+	cfgDir, dirErr := resolveConfigDir(*configDirFlag, os.Getenv, home)
+	if dirErr != nil {
+		if *checkOnly {
+			fmt.Fprintln(os.Stderr, dirErr)
+		} else {
+			logger.Error("config dir resolution failed", "err", dirErr)
+		}
+		os.Exit(1)
 	}
 	cfg, lib, err := loadAll(cfgDir)
 	if *checkOnly {
@@ -91,23 +96,27 @@ func main() {
 	go engine.Run(ctx, effects.TickInterval)
 	handler := api.NewHandler(disp, engine, lib)
 
-	// socketPath is derived from config.yaml / the user's own home directory —
-	// gosec's taint analysis treats config files as untrusted input reaching a
-	// filesystem path, but the only party who can set it here is the same
-	// local user running the daemon, so there is no privilege boundary being
-	// crossed.
+	// socketPath comes from config.yaml's listeners.socket.path or the
+	// $HOME-derived default — gosec's taint analysis treats config files as
+	// untrusted input reaching a filesystem path, but the only party who can
+	// set it here is the same local user running the daemon, so there is no
+	// privilege boundary being crossed.
 	socketPath := resolveSocketPath(cfg.Listeners.Socket.Path, home)
-	if err := os.MkdirAll(filepath.Dir(socketPath), 0o700); err != nil { // #nosec G703 -- socketPath is the local user's own config/env, not attacker-controlled
+	if err := os.MkdirAll(filepath.Dir(socketPath), 0o700); err != nil { // #nosec G703 -- socketPath is config.yaml or the $HOME-derived default, not attacker-controlled
 		logger.Error("could not create socket dir", "err", err)
 		os.Exit(1)
 	}
-	_ = os.Remove(socketPath) // #nosec G703 -- clear a stale socket left by a previous crashed run; path is the local user's own config/env
+	// Only remove a stale socket left by a previous crashed run — never an
+	// arbitrary file a misconfigured listeners.socket.path happens to name.
+	if fi, statErr := os.Lstat(socketPath); statErr == nil && fi.Mode()&os.ModeSocket != 0 {
+		_ = os.Remove(socketPath) // #nosec G703 -- socketPath is config.yaml or the $HOME-derived default, not attacker-controlled; Mode() check above confirms it's a socket
+	}
 	listener, err := net.Listen("unix", socketPath)
 	if err != nil {
 		logger.Error("could not listen on unix socket", "err", err)
 		os.Exit(1)
 	}
-	if err := os.Chmod(socketPath, 0o600); err != nil { // #nosec G703 -- socketPath is the local user's own config/env, not attacker-controlled
+	if err := os.Chmod(socketPath, 0o600); err != nil { // #nosec G703 -- socketPath is config.yaml or the $HOME-derived default, not attacker-controlled
 		logger.Error("could not chmod socket", "err", err)
 		os.Exit(1)
 	}
@@ -246,8 +255,8 @@ func probeUID(path string, logger *slog.Logger) (uid [8]byte, hasUID bool) {
 }
 
 // pollForDevices re-enumerates every enumeratePollInterval, reconciles
-// registry (rewiring reconnected devices, evicting stale-untethered ones per
-// Task 6), calls syncDevices to fetch capabilities for any device that needs
+// registry (rewiring reconnected devices, evicting stale-untethered ones),
+// calls syncDevices to fetch capabilities for any device that needs
 // them (which also redraws reconnected devices from cache, faster than
 // RunPeriodicRedraw's unconditional 5s sweep started separately in main()),
 // and forgets cache's entry for any device Reconcile reports as Evicted, so
@@ -309,6 +318,28 @@ func loadAll(dir string) (*config.Config, *effects.Library, error) {
 		return nil, nil, fmt.Errorf("effects: %w", err)
 	}
 	return cfg, lib, nil
+}
+
+// resolveConfigDir applies -config's precedence over the default
+// (${XDG_CONFIG_HOME:-~/.config}/blinkenkeys, with ~/ expanded): an explicit
+// flag value must name an existing directory, so a typo fails loudly instead
+// of -check-config silently falling through to "ok" with an empty library.
+func resolveConfigDir(flagVal string, getenv func(string) string, home string) (string, error) {
+	if flagVal == "" {
+		return config.Dir(getenv, home), nil
+	}
+	dir := flagVal
+	if strings.HasPrefix(dir, "~/") {
+		dir = filepath.Join(home, dir[2:])
+	}
+	info, err := os.Stat(dir)
+	switch {
+	case err != nil:
+		return "", fmt.Errorf("config dir %q: %w", flagVal, err)
+	case !info.IsDir():
+		return "", fmt.Errorf("config dir %q: not a directory", flagVal)
+	}
+	return dir, nil
 }
 
 // resolveSocketPath applies the socket path precedence: config.yaml (with

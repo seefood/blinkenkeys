@@ -23,9 +23,10 @@ bk() { curl -s -w '%{http_code}\n' --unix-socket "$SOCK" -X PUT -d "$2" "http://
    solid red at 5:00.
 4. **Supersession:** while it runs, `bk 0,0 '{"state":"claude/working"}'` → key
    breathes blue immediately, with no red flash from the old timer's final state.
-   Peak brightness usually undershoots 100% by a small amount (up to ~10%) —
-   expected, see CHANGELOG.md's 2026-09-24 "Accepted known gap" entry on
-   `breathe`'s tick-phase sampling; not a bug to chase.
+   Peak brightness usually misses 100% by a small amount (up to ~10% for this
+   effect's 0.5 Hz frequency; faster effects miss by more) — expected, see
+   CHANGELOG.md's 2026-09-24 "Accepted known gap" entry on `breathe`'s
+   tick-phase sampling; not a bug to chase.
 5. **Addressing:** `bk led:0 '{"color":"#ffffff"}'` and `bk idx:0 '{"color":"#ff00ff"}'`
    → 204 and visible; `bk esc '{"color":"red"}'` → `501`; `bk 9,9 '{"color":"red"}'` → `404`.
 6. **Unplug mid-timer:** start `claude/idle`, unplug before 3:00, replug after

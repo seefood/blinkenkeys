@@ -42,7 +42,7 @@ revises.
   `settings`; strict `config.yaml` decoding; `0xFF` LEDs excluded from
   `R,C`/`idx:`; `ConnectedWithoutCaps` drives the capabilities retry (`Added` only
   feeds the first-seen log hint); single-job redraw; `-check-config`; unknown
-  device/effect/state 404s list the known names; `duration: 3m` strings.
+  effect/state 404s list the known names; `duration: 3m` strings.
   Accepted known gap: an effect started on a pre-declared device before it first
   connects keeps its literal-address target, so a later command on the same key in another form doesn't supersede it.
 - **2026-09-24**: Post-implementation revision, made during Phase 3 integration
@@ -53,15 +53,24 @@ revises.
   state. `config.Dir` keeps `$XDG_CONFIG_HOME` as the standard fallback base for
   the *default* location; it no longer accepts an override env var.
 - **2026-09-24**: Accepted known gap, found during hardware verification: a
-  running `breathe` effect's peak brightness usually undershoots 100% V by a
-  small amount (up to ~10%, depending on the effect's start-time phase offset
-  against the engine's fixed 5fps tick). `breatheFrame`'s math is correct and
-  reaches exactly full V at the true mathematical peak (see its unit tests);
-  the shortfall comes from `Engine.Tick` sampling on a global tick grid whose
-  phase is independent of each effect's start time, so the exact peak sample
-  is rarely landed on. Not fixed — the alternative (snapping each effect's
-  start time to the tick grid) trades this for a visible phase jump between
-  the first frame and the first ticked frame, which isn't clearly better.
+  running `breathe` effect's peak (and trough) brightness usually misses its
+  target V by an amount that scales with the effect's frequency and duty
+  cycle, not a fixed percentage — worst case is about
+  `0.1s * frequency_hz / duty_cycle` of full V, which is ~10% for the shipped
+  `breathe_blue.yaml` example (0.5 Hz, duty 0.5) but ~20% at 1 Hz duty 0.5;
+  effects above roughly 2.5 Hz can't be represented meaningfully on a 5fps
+  tick at all (Nyquist). `breatheFrame`'s math is correct and reaches exactly
+  full V at the true mathematical peak (see its unit tests); the shortfall
+  comes from `Engine.Tick` sampling on a global tick grid whose phase is
+  independent of each effect's start time, so the exact peak sample is
+  rarely landed on. Not fixed in Phase 3: a cheap partial fix (align each
+  effect's start time to the previous tick instead of the command's
+  `time.Now()`) exists and, contrary to what was first assumed here, does
+  not cost a visible phase jump — but it only lands the peak exactly when
+  `duty_cycle / frequency_hz` is itself a multiple of the tick interval
+  (true for the shipped example, not for e.g. 1 Hz duty 0.5), so it trades
+  one known gap for a narrower one rather than closing it. Left open for a
+  later decision on whether that trade is worth taking.
 - **Future work (not scheduled)**: `breathe` currently scales V from 0 to the
   given color's full V; raised during the same hardware session as a possible
   follow-up is a `min`/`max` V pair (or fraction) so it breathes between two

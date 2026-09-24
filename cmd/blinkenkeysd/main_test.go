@@ -86,6 +86,39 @@ func TestResolveSocketPath(t *testing.T) {
 	}
 }
 
+func TestResolveConfigDir(t *testing.T) {
+	unset := func(string) string { return "" }
+
+	if got, err := resolveConfigDir("", unset, "/home/u"); err != nil || got != "/home/u/.config/blinkenkeys" {
+		t.Errorf("resolveConfigDir(\"\", ...) = %q, %v, want /home/u/.config/blinkenkeys, nil", got, err)
+	}
+
+	dir := t.TempDir()
+	if got, err := resolveConfigDir(dir, unset, "/home/u"); err != nil || got != dir {
+		t.Errorf("resolveConfigDir(%q, ...) = %q, %v, want %q, nil", dir, got, err, dir)
+	}
+
+	tilde := filepath.Join(dir, "bkcfg")
+	if err := os.Mkdir(tilde, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := resolveConfigDir("~/bkcfg", unset, dir); err != nil || got != tilde {
+		t.Errorf("resolveConfigDir(\"~/bkcfg\", ...) = %q, %v, want %q, nil", got, err, tilde)
+	}
+
+	if _, err := resolveConfigDir(filepath.Join(dir, "missing"), unset, "/home/u"); err == nil {
+		t.Error("resolveConfigDir: want error for missing dir")
+	}
+
+	file := filepath.Join(dir, "notadir")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolveConfigDir(file, unset, "/home/u"); err == nil {
+		t.Error("resolveConfigDir: want error for a file, not a directory")
+	}
+}
+
 func TestLoadAllExamples(t *testing.T) {
 	if _, _, err := loadAll(filepath.Join("..", "..", "examples", "config")); err != nil {
 		t.Errorf("loadAll(examples/config): %v", err)
