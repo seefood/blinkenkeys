@@ -155,6 +155,17 @@ and Vial (or `set_key_color.py`, or any other tool talking to the same interface
 against the same device simultaneously doesn't work; whichever opened it first keeps
 it, and the other fails to open the device until the first one releases it.
 
+To free the device for Vial without uninstalling the service:
+
+- **Linux:** `systemctl --user stop blinkenkeysd.service`, then
+  `systemctl --user start blinkenkeysd.service` (or just
+  `packaging/linux/install.sh`) when you're done.
+- **macOS:** `launchctl bootout "gui/$(id -u)/com.seefood.blinkenkeysd"`, then
+  `launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.seefood.blinkenkeysd.plist`
+  (or just `packaging/macos/install.sh`) when you're done. Note `bootout` only
+  stops it for the current login session — since the LaunchAgent has
+  `RunAtLoad`, it comes back automatically on your next login/reboot.
+
 VialRGB Direct-mode colors (`g_direct_mode_colors`) live in RAM only and are lost on
 any firmware reset, USB replug, or brownout — the daemon has no way to read the
 device's previous LED state back, only to (re)assert what it should be. This is why
