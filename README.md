@@ -41,8 +41,22 @@ without touching your `~/.config/blinkenkeys/` config or
 [`docs/superpowers/manual-checks/phase2-5-linux-install.md`](docs/superpowers/manual-checks/phase2-5-linux-install.md)
 for the full install/uninstall verification checklist.
 
-**macOS:** designed but not implemented yet — see
-[the Phase 2.5 design spec](docs/superpowers/specs/2026-09-24-blinkenkeys-phase2-5-service-installers-design.md).
+**macOS:** `packaging/macos/install.sh` installs the binary and a
+`launchd` LaunchAgent (`~/Library/LaunchAgents/com.seefood.blinkenkeysd.plist`)
+that starts `blinkenkeysd` at login — no root, no TCC grant needed (see
+[the Phase 2.5 design spec](docs/superpowers/specs/2026-09-24-blinkenkeys-phase2-5-service-installers-design.md)).
+It's idempotent — safe to re-run after a rebuild; pass `--force` to reinstall
+unconditionally.
+
+```bash
+packaging/macos/install.sh
+```
+
+`packaging/macos/uninstall.sh` reverses it (binary, LaunchAgent) without
+touching your `~/.config/blinkenkeys/` config or
+`~/.local/state/blinkenkeys/` runtime data. See
+[`docs/superpowers/manual-checks/phase2-5-macos-install.md`](docs/superpowers/manual-checks/phase2-5-macos-install.md)
+for the full install/uninstall verification checklist.
 
 ## Scratching my itch
 
