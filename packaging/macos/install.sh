@@ -4,6 +4,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN_DIR="${XDG_BIN_HOME:-$HOME/.local/bin}"
 LOG_DIR="$HOME/.local/state/blinkenkeys"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/blinkenkeys"
+SRC_CONFIG="$SCRIPT_DIR/../../examples/config"
 LABEL="com.seefood.blinkenkeysd"
 PLIST_DEST="$HOME/Library/LaunchAgents/$LABEL.plist"
 DOMAIN_TARGET="gui/$(id -u)/$LABEL"
@@ -24,6 +26,7 @@ esac
 
 bin_changed=0
 plist_changed=0
+config_seeded=0
 
 mkdir -p "$BIN_DIR" "$LOG_DIR" "$(dirname "$PLIST_DEST")"
 
@@ -39,6 +42,14 @@ if [[ "$FORCE" -eq 1 ]] || ! cmp -s "$SRC_BIN" "$DEST_BIN" 2>/dev/null; then
 	# truncating in place, so this works even while the old binary is running.
 	install -m 0755 "$SRC_BIN" "$DEST_BIN"
 	bin_changed=1
+fi
+
+if [[ ! -f "$CONFIG_DIR/config.yaml" ]]; then
+	mkdir -p "$CONFIG_DIR/templates" "$CONFIG_DIR/effects"
+	cp "$SRC_CONFIG/config.yaml" "$CONFIG_DIR/config.yaml"
+	cp "$SRC_CONFIG/templates/"*.yaml "$CONFIG_DIR/templates/"
+	cp "$SRC_CONFIG/effects/"*.yaml "$CONFIG_DIR/effects/"
+	config_seeded=1
 fi
 
 RENDERED_PLIST="$(mktemp)"
@@ -67,6 +78,7 @@ fi
 
 echo
 echo "binary: $([[ $bin_changed -eq 1 ]] && echo "installed to $DEST_BIN" || echo "already up to date")"
+echo "config: $([[ $config_seeded -eq 1 ]] && echo "seeded default config at $CONFIG_DIR" || echo "already present, left untouched")"
 echo "plist:  $([[ $plist_changed -eq 1 ]] && echo "installed to $PLIST_DEST" || echo "already up to date")"
 echo
 launchctl print "$DOMAIN_TARGET"

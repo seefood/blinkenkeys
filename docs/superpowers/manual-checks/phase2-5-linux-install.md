@@ -30,8 +30,10 @@ HID device).
    packaging/linux/install.sh
    ```
    Confirm: prompts for `sudo` password once (for the udev rule), prints all
-   three artifacts as "installed", ends with
+   four artifacts as "installed"/"seeded", ends with
    `systemctl --user status blinkenkeysd.service` showing `active (running)`.
+   Confirm `${XDG_CONFIG_HOME:-~/.config}/blinkenkeys/{config.yaml,templates/,effects/}`
+   now exist, matching `examples/config/`.
 
    `~/.config/systemd/user/` not existing yet on a genuinely fresh machine
    (Review Focus: missing parent directories) is covered by code inspection
@@ -69,19 +71,24 @@ HID device).
    ```bash
    packaging/linux/install.sh
    ```
-   Confirm: no `sudo` prompt this time, all three artifacts print "already
-   up to date", `systemctl --user status` still shows the *same* process
-   (compare `Main PID` before/after — it must NOT have restarted). Re-check
+   Confirm: no `sudo` prompt this time, binary/unit/udev-rule print "already
+   up to date" and config prints "already present, left untouched",
+   `systemctl --user status` still shows the *same* process (compare `Main
+   PID` before/after — it must NOT have restarted). Re-check
    `99-vial.rules`'s hash/mtime against step 0 again.
 
-6. **`--force` re-install while running:**
+6. **`--force` re-install while running, and confirm config is exempt:**
    ```bash
+   echo '# local edit' >> "${XDG_CONFIG_HOME:-$HOME/.config}/blinkenkeys/config.yaml"
    packaging/linux/install.sh --force
+   tail -1 "${XDG_CONFIG_HOME:-$HOME/.config}/blinkenkeys/config.yaml"
    ```
-   Confirm: all three artifacts print as (re)installed, `Main PID` in the
-   final status output is *different* from step 5 (confirms the restart
-   actually happened, not just a re-copy on disk). Re-check `99-vial.rules`
-   against step 0 again.
+   Confirm: binary/unit/udev-rule print as (re)installed, config still prints
+   "already present, left untouched" (`--force` doesn't apply to it), the
+   `# local edit` line is still there, and `Main PID` in the final status
+   output is *different* from step 5 (confirms the restart actually
+   happened, not just a re-copy on disk). Re-check `99-vial.rules` against
+   step 0 again.
 
 7. **Functional check:** with the service running from step 6, confirm the
    daemon actually works end-to-end:
@@ -110,6 +117,6 @@ HID device).
    all four summary lines print "already absent"/"was not loaded".
 
 10. **User data survives uninstall:** confirm
-    `${XDG_CONFIG_HOME:-~/.config}/blinkenkeys/` (if you'd copied
-    `examples/config/` there) and `~/.local/state/blinkenkeys/` are both
+    `${XDG_CONFIG_HOME:-~/.config}/blinkenkeys/` (seeded in step 2, or your
+    own customized version of it) and `~/.local/state/blinkenkeys/` are both
     still present after step 8 — `uninstall.sh` must not have touched them.

@@ -28,8 +28,12 @@ make build   # produces bin/blinkenkeysd
 **Linux:** `packaging/linux/install.sh` installs the binary, a udev rule
 granting the logged-in user unprivileged access to the device (no root
 needed after the one-time rule install), and a `systemd --user` service
-that starts `blinkenkeysd` at login. It's idempotent — safe to re-run
-after a rebuild; pass `--force` to reinstall unconditionally.
+that starts `blinkenkeysd` at login. It also seeds
+`${XDG_CONFIG_HOME:-~/.config}/blinkenkeys/` from `examples/config/` the
+first time (never overwriting a config you've already customized, even with
+`--force`) — edit its `devices:` entry to match your own board's uid. It's
+idempotent — safe to re-run after a rebuild; pass `--force` to reinstall the
+binary/unit/rule unconditionally.
 
 ```bash
 packaging/linux/install.sh
@@ -45,8 +49,11 @@ for the full install/uninstall verification checklist.
 `launchd` LaunchAgent (`~/Library/LaunchAgents/com.seefood.blinkenkeysd.plist`)
 that starts `blinkenkeysd` at login — no root, no TCC grant needed (see
 [the Phase 2.5 design spec](docs/superpowers/specs/2026-09-24-blinkenkeys-phase2-5-service-installers-design.md)).
-It's idempotent — safe to re-run after a rebuild; pass `--force` to reinstall
-unconditionally.
+It also seeds `${XDG_CONFIG_HOME:-~/.config}/blinkenkeys/` from
+`examples/config/` the first time (never overwriting a config you've already
+customized, even with `--force`) — edit its `devices:` entry to match your
+own board's uid. It's idempotent — safe to re-run after a rebuild; pass
+`--force` to reinstall the binary/plist unconditionally.
 
 ```bash
 packaging/macos/install.sh

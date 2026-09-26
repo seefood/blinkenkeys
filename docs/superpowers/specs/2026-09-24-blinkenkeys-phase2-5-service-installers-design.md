@@ -306,6 +306,29 @@ confirmed on real macOS hardware when this is implemented, per the same
 verification standard the Linux side got by being tested against real
 hardware in this session.
 
+### Both platforms: default config seeding
+
+Both `install.sh` scripts also seed `${XDG_CONFIG_HOME:-$HOME/.config}/blinkenkeys/`
+from `examples/config/` (`config.yaml`, `templates/*.yaml`, `effects/*.yaml` —
+not `examples/config/README.md`, which is a schema reference for humans, not
+installer-owned content) — added after this spec's initial pass, once a
+real-world install (a client's hook payloads all use named `state`s like
+`claude/waiting`) showed a daemon with no config at all can't resolve any of
+them, only raw colors.
+
+This step runs unconditionally on every `install.sh` invocation but only ever
+*creates*: it's gated on `${CONFIG_DIR}/config.yaml` not already existing, and
+that gate is **not** affected by `--force` — unlike the binary/unit/plist
+artifacts, this is user data the moment it's written (the same reasoning
+`uninstall.sh` already applies by never removing `~/.config/blinkenkeys/`), so
+a customized config is never clobbered by a later `--force` reinstall or
+rebuild. The seeded `config.yaml`'s `devices:` entry still names the sample
+device (`macropad`); the user edits it to match their own board's uid the same
+way they would following `examples/config/README.md` directly — the installer
+doesn't attempt to auto-detect and substitute the real device id, since that
+would require the daemon to have already enumerated the device once, which
+hasn't happened yet at seeding time.
+
 ### Testing / verification
 
 `install.sh` performs real system mutations (installs a udev rule, changes

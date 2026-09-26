@@ -4,6 +4,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN_DIR="${XDG_BIN_HOME:-$HOME/.local/bin}"
 UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/blinkenkeys"
+SRC_CONFIG="$SCRIPT_DIR/../../examples/config"
 RULES_DEST="/etc/udev/rules.d/70-blinkenkeys.rules"
 SERVICE_NAME="blinkenkeysd.service"
 
@@ -24,6 +26,7 @@ esac
 bin_changed=0
 unit_changed=0
 rule_changed=0
+config_seeded=0
 
 mkdir -p "$BIN_DIR" "$UNIT_DIR"
 
@@ -40,6 +43,14 @@ if [[ "$FORCE" -eq 1 ]] || ! cmp -s "$SRC_BIN" "$DEST_BIN" 2>/dev/null; then
 	# (plain cp fails with ETXTBSY in that case).
 	install -m 0755 "$SRC_BIN" "$DEST_BIN"
 	bin_changed=1
+fi
+
+if [[ ! -f "$CONFIG_DIR/config.yaml" ]]; then
+	mkdir -p "$CONFIG_DIR/templates" "$CONFIG_DIR/effects"
+	cp "$SRC_CONFIG/config.yaml" "$CONFIG_DIR/config.yaml"
+	cp "$SRC_CONFIG/templates/"*.yaml "$CONFIG_DIR/templates/"
+	cp "$SRC_CONFIG/effects/"*.yaml "$CONFIG_DIR/effects/"
+	config_seeded=1
 fi
 
 RENDERED_UNIT="$(mktemp)"
@@ -76,6 +87,7 @@ fi
 
 echo
 echo "binary:    $([[ $bin_changed -eq 1 ]] && echo "installed to $DEST_BIN" || echo "already up to date")"
+echo "config:    $([[ $config_seeded -eq 1 ]] && echo "seeded default config at $CONFIG_DIR" || echo "already present, left untouched")"
 echo "unit:      $([[ $unit_changed -eq 1 ]] && echo "installed to $DEST_UNIT" || echo "already up to date")"
 echo "udev rule: $([[ $rule_changed -eq 1 ]] && echo "installed to $RULES_DEST" || echo "already up to date")"
 echo

@@ -135,3 +135,17 @@ model" section)
   `install.sh` — reverses each of the three artifacts `install.sh` installs
   (binary, systemd unit, udev rule), idempotent, and leaves user
   config/state directories untouched.
+- **2026-09-26**: Implemented the macOS installer (`packaging/macos/`) that
+  this spec had left for the user to write — `install.sh`, `uninstall.sh`,
+  the LaunchAgent plist, and a manual-check doc, verified end-to-end on real
+  macOS hardware (fresh install, idempotent re-run, `--force` reload,
+  functional HID round-trip, uninstall, idempotent uninstall, user-data
+  survival). Also added default-config seeding to *both* platforms'
+  `install.sh` — neither had ever populated
+  `${XDG_CONFIG_HOME:-~/.config}/blinkenkeys/`, so a fresh install had no
+  `templates:`/`effects:` for named-`state` API calls to resolve against
+  (only raw colors worked), which is what surfaced this gap: a client's
+  hooks all address states, not colors. Seeds from `examples/config/` only
+  if `config.yaml` doesn't already exist, and that check ignores `--force` —
+  the config is user data the moment it's written, same as `uninstall.sh`'s
+  existing "never touch `~/.config/blinkenkeys/`" rule.
