@@ -38,6 +38,7 @@ type Dispatcher interface {
 // enforced in one place. *effects.Engine implements it.
 type Writer interface {
 	SetColor(t effects.Target, c color.HSV) error
+	ClearIfOwner(t effects.Target, owner string) (bool, error)
 	SetColorFrom(t effects.Target, c color.HSV, o effects.Origin, now time.Time) error
 	StartFrom(t effects.Target, tl *effects.Timeline, now time.Time, o effects.Origin) error
 	Status(t effects.Target, now time.Time) (effects.Status, bool)
@@ -209,17 +210,22 @@ func (h *Handler) releaseKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	target := effects.Target{Device: device, Addr: led}
-	if owner := r.URL.Query().Get("owner"); owner != "" {
-		if st, ok := h.w.Status(target, time.Now()); ok && st.Origin.Owner != owner {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-	}
 	// Blank before releasing: a still-running effect (e.g. timer5min) would
 	// otherwise keep animating an LED nothing owns anymore.
 	// If the blank fails, keep the claim: freeing it while the LED may still
 	// hold its color/effect would leave an orphaned, unowned key.
-	if err := h.w.SetColor(target, color.HSV{}); err != nil {
+	// With ?owner= the owner check and the blank are one engine call, so a
+	// racing write by another owner is never blanked.
+	if owner := r.URL.Query().Get("owner"); owner != "" {
+		var cleared bool
+		if cleared, err = h.w.ClearIfOwner(target, owner); err == nil && !cleared {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+	} else {
+		err = h.w.SetColor(target, color.HSV{})
+	}
+	if err != nil {
 		if h.logger != nil {
 			h.logger.Warn("blank-on-release failed", "device", device, "key", addr.String(), "err", err)
 		}

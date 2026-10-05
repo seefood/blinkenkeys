@@ -150,6 +150,55 @@ func TestTickWriteFailureMarksRecordFailed(t *testing.T) {
 	}
 }
 
+// ClearIfOwner blanks (and cancels, and drops the record) only when there is
+// no record or its Owner matches, in one lock hold.
+func TestClearIfOwner(t *testing.T) {
+	out := &fakeSetter{}
+	e := NewEngine(out, nil)
+	t0 := time.Unix(1000, 0)
+	tl := statusTimeline(t, "pulse", tenSecondRed)
+	_ = e.StartFrom(tgt("a", 1), tl, t0, Origin{Type: "effect", Ref: "pulse", Owner: "b"})
+
+	if cleared, err := e.ClearIfOwner(tgt("a", 1), "a"); err != nil || cleared {
+		t.Fatalf("other owner: cleared %v, %v; want false", cleared, err)
+	}
+	if st, ok := e.Status(tgt("a", 1), t0); !ok || st.Origin.Owner != "b" || !st.Effect.Running {
+		t.Errorf("mismatch must leave the key alone: %+v, %v", st, ok)
+	}
+	n := len(out.writes)
+	if cleared, err := e.ClearIfOwner(tgt("a", 1), "b"); err != nil || !cleared {
+		t.Fatalf("matching owner: cleared %v, %v; want true", cleared, err)
+	}
+	if len(out.writes) != n+1 || out.writes[n].c != (color.HSV{}) {
+		t.Errorf("writes = %+v, want one blank", out.writes[n:])
+	}
+	if _, ok := e.Status(tgt("a", 1), t0); ok {
+		t.Error("record must be dropped")
+	}
+	e.Tick(t0.Add(time.Second))
+	if len(out.writes) != n+1 {
+		t.Error("effect kept running after ClearIfOwner")
+	}
+	// No record: proceeds (see the F8 ruling in the spec).
+	if cleared, err := e.ClearIfOwner(tgt("a", 2), "a"); err != nil || !cleared {
+		t.Errorf("no record: cleared %v, %v; want true", cleared, err)
+	}
+	// Untagged record with an owner given: mismatch.
+	_ = e.SetColorFrom(tgt("a", 3), color.HSV{V: 1}, Origin{Type: "color", Ref: "x"}, t0)
+	if cleared, _ := e.ClearIfOwner(tgt("a", 3), "a"); cleared {
+		t.Error("untagged record must not be cleared by an owner")
+	}
+	// A failed blank keeps the record and reports the error.
+	_ = e.SetColorFrom(tgt("a", 4), color.HSV{V: 1}, Origin{Type: "color", Ref: "x", Owner: "a"}, t0)
+	out.err = errors.New("queue full")
+	if cleared, err := e.ClearIfOwner(tgt("a", 4), "a"); err == nil || cleared {
+		t.Errorf("failed blank: cleared %v, %v", cleared, err)
+	}
+	if _, ok := e.Status(tgt("a", 4), t0); !ok {
+		t.Error("failed blank dropped the record")
+	}
+}
+
 func TestStatusesFiltersByDevice(t *testing.T) {
 	e := NewEngine(&statusSetter{}, nil)
 	t0 := time.Unix(1000, 0)

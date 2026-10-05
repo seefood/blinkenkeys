@@ -61,6 +61,26 @@ func (e *Engine) SetColorFrom(t Target, c color.HSV, o Origin, now time.Time) er
 	return e.setColor(t, c, &record{origin: o, setAt: now})
 }
 
+// ClearIfOwner is SetColor(t, black) made conditional on t's status record:
+// it blanks only if t has no record or the record's Owner equals owner, and
+// reports whether it did. The check and the blank happen under one lock
+// hold, so a write by another owner can't slip in between and be blanked.
+// owner must be non-empty, so an untagged record (empty Owner) never
+// matches. A failed write returns the error with nothing changed.
+func (e *Engine) ClearIfOwner(t Target, owner string) (bool, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if rec, ok := e.records[t]; ok && rec.origin.Owner != owner {
+		return false, nil
+	}
+	if err := e.out.Write(t.Device, t.Addr, color.HSV{}); err != nil {
+		return false, err
+	}
+	delete(e.running, t)
+	delete(e.records, t)
+	return true, nil
+}
+
 func (e *Engine) setColor(t Target, c color.HSV, rec *record) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()

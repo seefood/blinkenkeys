@@ -108,6 +108,19 @@ func (f *fakeWriter) SetColor(t effects.Target, c color.HSV) error {
 	return f.err
 }
 
+// ClearIfOwner mirrors effects.Engine.ClearIfOwner over f.status; a clear is
+// recorded as a SetColor to black.
+func (f *fakeWriter) ClearIfOwner(t effects.Target, owner string) (bool, error) {
+	if st, ok := f.status[t]; ok && st.Origin.Owner != owner {
+		return false, nil
+	}
+	if err := f.SetColor(t, color.HSV{}); err != nil {
+		return false, err
+	}
+	delete(f.status, t)
+	return true, nil
+}
+
 func (f *fakeWriter) SetColorFrom(t effects.Target, c color.HSV, o effects.Origin, _ time.Time) error {
 	f.origins = append(f.origins, o)
 	return f.SetColor(t, c)
