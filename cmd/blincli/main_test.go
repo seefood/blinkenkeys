@@ -113,6 +113,9 @@ func TestHelpAndVersion(t *testing.T) {
 	if code := a.run([]string{"--help"}); code != 0 || !strings.Contains(out.String(), "Usage: blincli") {
 		t.Errorf("--help: %d %q", code, out)
 	}
+	if !strings.Contains(out.String(), "-v=false") {
+		t.Errorf("--help must say how to undo a pre-command boolean (-v=false):\n%s", out)
+	}
 	a, out, _ = testApp(nil)
 	if code := a.run([]string{"version"}); code != 0 || !strings.HasPrefix(out.String(), "blincli ") {
 		t.Errorf("version: %d %q", code, out)
@@ -176,6 +179,11 @@ func TestCommandGlobalsOverridePreCommand(t *testing.T) {
 	}
 	if w := f.writes(); len(w) != 1 || w[0].Path != "/devices/dev/keys/idx:0" {
 		t.Errorf("writes = %+v", w)
+	}
+	// the documented way to undo a pre-command boolean
+	a, _, errb = testApp(map[string]string{"BLINKENKEYS_TOKEN": "tok"})
+	if code := a.run([]string{"-v", "set", "-v=false", "-u", srv.URL, "-d", "dev", "-k", "idx:0", "-c", "red"}); code != 0 || errb.Len() != 0 {
+		t.Errorf("-v ... -v=false: code %d, stderr %q", code, errb)
 	}
 }
 

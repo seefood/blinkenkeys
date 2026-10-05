@@ -153,6 +153,8 @@ Global options (accepted before or after the command):
   -v, --verbose          print resolved endpoint/device/key to stderr
   -q, --quiet            suppress non-error output
   -h, --help
+A value given after the command overrides one given before it; to switch
+off -v/-q given before the command, use -v=false / -q=false after it.
 
 Exit codes: 0 ok, 1 daemon error, 64 usage, 66 key not registered,
 69 daemon unreachable, 77 auth, 78 no endpoint or invalid config.
