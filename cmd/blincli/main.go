@@ -130,9 +130,14 @@ func (a *app) vlog(g *globals, format string, args ...any) {
 	}
 }
 
+// resolver is the endpoint resolver; config-permission warnings go to stderr.
+func (a *app) resolver() client.Resolver {
+	return client.Resolver{Getenv: a.getenv, Home: a.home, Warn: func(w string) { _, _ = fmt.Fprintln(a.stderr, w) }}
+}
+
 // session resolves the endpoint and builds a client.
 func (a *app) session(g *globals) (*client.Client, client.Endpoint, client.FileConfig, error) {
-	r := client.Resolver{Getenv: a.getenv, Home: a.home}
+	r := a.resolver()
 	ep, fc, err := r.Resolve(client.Options{Socket: g.Socket, URL: g.URL, Token: g.Token, TokenFile: g.TokenFile, ConfigPath: g.Config})
 	if err != nil {
 		return nil, ep, fc, err
@@ -205,7 +210,7 @@ func (a *app) cmdDetect(args []string) int {
 	default:
 		_, _ = fmt.Fprintf(a.stdout, "key        name %s (claimed from the pool; shared slot if it is full)\n", plan.Name)
 	}
-	r := client.Resolver{Getenv: a.getenv, Home: a.home}
+	r := a.resolver()
 	ep, _, err := r.Resolve(client.Options{Socket: g.Socket, URL: g.URL, Token: g.Token, TokenFile: g.TokenFile, ConfigPath: g.Config})
 	if err != nil {
 		_, _ = fmt.Fprintf(a.stdout, "transport  none (%v)\n", firstLine(err.Error()))

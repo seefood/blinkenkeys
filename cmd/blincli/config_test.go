@@ -1,6 +1,7 @@
 package main
 
 import (
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -250,6 +251,45 @@ func TestConfigPath(t *testing.T) {
 	a.run([]string{"config", "path", "-C", path})
 	if strings.TrimSpace(out.String()) != path {
 		t.Errorf("path = %q", out)
+	}
+}
+
+func TestOpenConfigWithTokenWarns(t *testing.T) {
+	f := &setFakeDaemon{}
+	srv := httptest.NewServer(f)
+	defer srv.Close()
+	for _, tc := range []struct {
+		mode os.FileMode
+		warn bool
+	}{{0o644, true}, {0o600, false}} {
+		a, path, out, errs := cfgApp(t, nil)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("url: "+srv.URL+"\ntoken: SECRETTOKEN123\ndevice: d\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(path, tc.mode); err != nil {
+			t.Fatal(err)
+		}
+		code := a.run([]string{"-C", path, "set", "-k", "idx:0", "-c", "red"})
+		if code != 0 {
+			t.Errorf("%o: code %d (a warning must not change the exit code): %s", tc.mode, code, errs)
+		}
+		all := out.String() + errs.String()
+		if strings.Contains(all, "SECRETTOKEN123") {
+			t.Errorf("%o: leaked the token: %s", tc.mode, all)
+		}
+		if got := strings.Contains(errs.String(), "readable"); got != tc.warn {
+			t.Errorf("%o: warned=%v, want %v; stderr %q", tc.mode, got, tc.warn, errs)
+		}
+		if tc.warn && strings.Count(errs.String(), "\n") != 1 {
+			t.Errorf("warning must be one line: %q", errs)
+		}
+		errs.Reset()
+		if code := a.run([]string{"config", "show", "-C", path}); code != 0 || strings.Contains(errs.String(), "readable") != tc.warn {
+			t.Errorf("%o: config show code %d, stderr %q", tc.mode, code, errs)
+		}
 	}
 }
 

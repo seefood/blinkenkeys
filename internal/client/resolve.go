@@ -92,6 +92,7 @@ or pass --url/--socket on each call, or set BLINKENKEYS_URL / BLINKENKEYS_SOCKET
 type Resolver struct {
 	Getenv func(string) string
 	Home   string
+	Warn   func(string) // optional; receives PermWarning for the loaded config
 }
 
 // ConfigPath is the client config path in effect.
@@ -108,6 +109,9 @@ func (r Resolver) Resolve(o Options) (Endpoint, FileConfig, error) {
 	fc, exists, err := LoadFile(path)
 	if err != nil {
 		return Endpoint{}, fc, err
+	}
+	if w := PermWarning(path, fc); w != "" && r.Warn != nil {
+		r.Warn(w)
 	}
 	layers := []struct{ url, socket, src string }{
 		{o.URL, o.Socket, "command line"},

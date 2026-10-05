@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/goccy/go-yaml"
@@ -62,6 +63,21 @@ func LoadFile(path string) (fc FileConfig, exists bool, err error) {
 		return FileConfig{}, true, fmt.Errorf("%w %s: %s", ErrBadConfig, path, msg)
 	}
 	return fc, true, nil
+}
+
+// PermWarning returns a one-line warning if fc (loaded from path) holds an
+// inline token and the file is group- or world-accessible; "" otherwise, and
+// always "" on Windows, which has no Unix modes.
+func PermWarning(path string, fc FileConfig) string {
+	if fc.Token == "" || runtime.GOOS == "windows" {
+		return ""
+	}
+	fi, err := os.Stat(path)
+	if err != nil || fi.Mode().Perm()&0o077 == 0 {
+		return ""
+	}
+	return fmt.Sprintf("blincli: warning: %s holds a token and is readable by others (mode %04o); run: chmod 600 %s",
+		path, fi.Mode().Perm(), path)
 }
 
 // ExpandHome expands a leading "~/".

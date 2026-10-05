@@ -59,6 +59,9 @@ func (a *app) configShow(args []string) int {
 		_, _ = fmt.Fprintf(a.stdout, "no config at %s\n", path)
 		return exitOK
 	}
+	if w := client.PermWarning(path, fc); w != "" {
+		_, _ = fmt.Fprintln(a.stderr, w)
+	}
 	_, _ = fmt.Fprintf(a.stdout, "# %s\n%s", path, renderConfig(client.FileConfig{
 		URL: client.RedactURL(fc.URL), Socket: fc.Socket, Token: maskIf(fc.Token), TokenFile: fc.TokenFile, Device: fc.Device, Slots: fc.Slots,
 	}))
