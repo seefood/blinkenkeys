@@ -71,11 +71,21 @@ real misconfiguration should surface as a non-blocking hook error.
   session shares a tab slot.
 - **Collisions:** the per-device `keys.collision` setting is `last-wins`
   (default; a later write takes the key over) or `displace` (the named claim
-  moves to the next free pool key).
+  moves to the next free pool key). With `displace` and a full pool there is
+  nowhere to move the claim, so it is released (last-wins) and the daemon
+  logs `displace: pool full`. Writes queued while the device's capabilities
+  are not yet known (e.g. right after it connects) are always resolved
+  last-wins, whatever `collision` says.
 - **`blincli clear` only blanks a key you still own** (owner tag match); if
   another session took the slot over, it stays lit. `clear --force` overrides.
 - **iTerm2 limitation:** `$ITERM_SESSION_ID` is fixed when the shell starts,
   so after reordering or closing tabs the tab number is stale.
+- **WezTerm caveat (unverified):** the tab number is the order in which the
+  pane's tab first appears among its window's entries in `wezterm cli list`,
+  assumed to follow tab order. This has not been
+  checked against a reordered tab bar (manual check 3 in
+  `docs/superpowers/manual-checks/blincli.md`); if it is wrong, a dragged tab
+  maps to the wrong key.
 - Debug with `blincli detect` (shows the recognized terminal, tab and key)
   and `-v` on any command.
 

@@ -31,12 +31,12 @@ around. See `config.yaml` in this directory for a filled-in example.
 ```yaml
 naming:
   prefer: uid          # "uid" (default), "path", or "vidpid" — falls back
-                        # automatically per-device if the preferred kind
-                        # isn't available for that device.
+                       # automatically per-device if the preferred kind
+                       # isn't available for that device.
 
 listeners:
   socket:
-    path: ""            # "" = default ~/.local/state/blinkenkeys/api.sock
+    path: ""             # "" = default ~/.local/state/blinkenkeys/api.sock
                          # (~ is expanded). Always on, mode 0600.
   tcp:                   # omit this whole block to disable (default: off)
     address: ":49994"    # no in-code default — must be set if tcp: is present
@@ -45,8 +45,8 @@ listeners:
 devices:
   - id: "my-macropad"    # required, non-empty, not all-digits, unique
     optional: false      # true = writes to this name succeed even before
-                          # the device has ever been seen, and it's exempt
-                          # from untethered-device eviction
+                         # the device has ever been seen, and it's exempt
+                         # from untethered-device eviction
     # keys:                 # optional per-device key roles, by idx (reading-order) index
     #   tabs: [0-5]         # tab-number slots, in order; list items are idx numbers or ranges, e.g. [0-4, 6, 8-10] or "0-4,6"
     #   pool: [6-11]        # keys named claims may be auto-assigned from; omitted = every row>=1 key not in tabs; [] = no pool
@@ -70,7 +70,7 @@ stages:
     settings:                     # stage except the last
       color: blue                 # hex "#rrggbb", "H,S,V" (0-255 each,
       frequency_hz: 0.5           # QMK-native scale), or a CSS/X11 name
-      duty_cycle: 0.5              # 0..1
+      duty_cycle: 0.5             # 0..1
   - primitive: alternate
     settings:
       color_a: green
@@ -80,8 +80,8 @@ stages:
       # no `duration` here: this is the last stage, so it's open-ended —
       # runs forever until superseded by the next write to this key
 final_state: "#ff0000"            # only meaningful (and only required) if
-                                   # every stage has a duration, i.e. the
-                                   # whole timeline is finite
+                                  # every stage has a duration, i.e. the
+                                  # whole timeline is finite
 ```
 
 Each stage sets **exactly one** of:
