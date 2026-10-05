@@ -21,6 +21,7 @@ type stage struct {
 // shared by every key running that effect; each run's start time is kept
 // by the Engine.
 type Timeline struct {
+	Name   string // the effect's name; set by the compiler
 	stages []stage
 	final  color.HSV
 }
@@ -116,7 +117,7 @@ func (c *compiler) compile(name string, stack []string) (*Timeline, error) {
 	if len(def.Stages) == 0 {
 		return nil, fmt.Errorf("%w: effect %q has no stages", ErrInvalid, name)
 	}
-	tl := &Timeline{}
+	tl := &Timeline{Name: name}
 	for i, sd := range def.Stages {
 		st, err := c.compileStage(sd, i == len(def.Stages)-1, stack)
 		if err != nil {
