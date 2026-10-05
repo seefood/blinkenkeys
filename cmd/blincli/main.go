@@ -134,7 +134,7 @@ func (a *app) fail(err error) int {
 
 func (a *app) vlog(g *globals, format string, args ...any) {
 	if g.Verbose {
-		_, _ = fmt.Fprintf(a.stderr, "blincli: "+format+"\n", args...)
+		_, _ = fmt.Fprintf(a.stderr, "blincli: %s\n", fmt.Sprintf(format, args...))
 	}
 }
 
@@ -200,35 +200,42 @@ func (a *app) cmdDetect(args []string) int {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
 	defer cancel()
+	w := a.stdout
+	if g.Quiet {
+		w = io.Discard
+	}
 	plan, id, perr := a.planKey(ctx, "", "")
+	if _, src := termid.FallbackName(a.getenv); src != "" {
+		a.vlog(g, "fallback name source $%s (used only without a terminal instance id)", src)
+	}
 	if id.Terminal == "" {
-		_, _ = fmt.Fprintln(a.stdout, "terminal   none recognized")
+		_, _ = fmt.Fprintln(w, "terminal   none recognized")
 	} else {
 		tab := "unknown"
 		if id.Tab > 0 {
 			tab = fmt.Sprint(id.Tab)
 		}
-		_, _ = fmt.Fprintf(a.stdout, "terminal   %s (instance %q, tab %s)\n", id.Terminal, id.InstanceID, tab)
+		_, _ = fmt.Fprintf(w, "terminal   %s (instance %q, tab %s)\n", id.Terminal, id.InstanceID, tab)
 	}
 	switch {
 	case perr != nil:
-		_, _ = fmt.Fprintf(a.stdout, "key        none (%v)\n", perr)
+		_, _ = fmt.Fprintf(w, "key        none (%v)\n", perr)
 	case plan.Mode == client.ModeSlot:
-		_, _ = fmt.Fprintf(a.stdout, "key        tab %d -> a tab slot (owner %s)\n", plan.Tab, plan.Owner)
+		_, _ = fmt.Fprintf(w, "key        tab %d -> a tab slot (owner %s)\n", plan.Tab, plan.Owner)
 	default:
-		_, _ = fmt.Fprintf(a.stdout, "key        name %s (claimed from the pool; shared slot if it is full)\n", plan.Name)
+		_, _ = fmt.Fprintf(w, "key        name %s (claimed from the pool; shared slot if it is full)\n", plan.Name)
 	}
 	r := a.resolver()
 	ep, _, err := r.Resolve(client.Options{Socket: g.Socket, URL: g.URL, Token: g.Token, TokenFile: g.TokenFile, ConfigPath: g.Config})
 	if err != nil {
-		_, _ = fmt.Fprintf(a.stdout, "transport  none (%v)\n", firstLine(err.Error()))
+		_, _ = fmt.Fprintf(w, "transport  none (%v)\n", firstLine(err.Error()))
 		return exitOK
 	}
 	where := ep.Socket
 	if ep.Remote() {
 		where = client.RedactURL(ep.BaseURL)
 	}
-	_, _ = fmt.Fprintf(a.stdout, "transport  %s %s  (%s)\n", ep.Kind, where, ep.Source)
+	_, _ = fmt.Fprintf(w, "transport  %s %s  (%s)\n", ep.Kind, where, ep.Source)
 	return exitOK
 }
 

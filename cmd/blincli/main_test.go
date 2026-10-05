@@ -202,6 +202,39 @@ func TestURLUserinfoNeverPrinted(t *testing.T) {
 	}
 }
 
+func TestCommandHelpIsCommandSpecific(t *testing.T) {
+	for cmd, wants := range map[string][]string{
+		"detect": {"Usage: blincli detect", "sends nothing"},
+		"set":    {"Usage: blincli set", "-c, --color", "-m, --slots", "--if-detected"},
+		"get":    {"Usage: blincli get", "-a, --all", "--json"},
+	} {
+		a, out, _ := testApp(nil)
+		if code := a.run([]string{cmd, "-h"}); code != 0 {
+			t.Errorf("%s -h: code %d", cmd, code)
+		}
+		for _, w := range wants {
+			if !strings.Contains(out.String(), w) {
+				t.Errorf("%s -h lacks %q:\n%s", cmd, w, out)
+			}
+		}
+		if strings.Contains(out.String(), "--socket") && !strings.Contains(out.String(), "blincli --help") {
+			t.Errorf("%s -h: global options should be referenced, not repeated:\n%s", cmd, out)
+		}
+	}
+}
+
+func TestDetectHonorsQuietAndVerbose(t *testing.T) {
+	env := map[string]string{"CLAUDE_CODE_SESSION_ID": "s1", "BLINKENKEYS_SOCKET": "/x.sock"}
+	a, out, errb := testApp(env)
+	if code := a.run([]string{"detect", "-q"}); code != 0 || out.Len() != 0 {
+		t.Errorf("detect -q: code %d, stdout %q", code, out)
+	}
+	a, out, errb = testApp(env)
+	if code := a.run([]string{"-v", "detect"}); code != 0 || !strings.Contains(errb.String(), "CLAUDE_CODE_SESSION_ID") {
+		t.Errorf("detect -v: code %d, stdout %q, stderr %q; want the fallback variable named", code, out, errb)
+	}
+}
+
 func TestDetectWithNothingStillReports(t *testing.T) {
 	a, out, _ := testApp(map[string]string{"BLINKENKEYS_SOCKET": "/x.sock"})
 	if code := a.run([]string{"detect"}); code != 0 || !strings.Contains(out.String(), "none") {
