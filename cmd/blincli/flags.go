@@ -15,14 +15,19 @@ type globals struct {
 
 // newFlags returns a FlagSet with the global options registered (each as
 // --long and -x). Errors are not printed by the flag package; parse reports them.
+// The globals start from those parsed before the command name (a.pre), so a
+// value given after the command overrides one given before it.
 func (a *app) newFlags(name string) (*flag.FlagSet, *globals) {
 	g := &globals{}
+	if a.pre != nil {
+		*g = *a.pre
+	}
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	str(fs, &g.Socket, "socket", "S", "Unix socket of a local blinkenkeysd")
 	str(fs, &g.URL, "url", "u", "remote blinkenkeysd, e.g. http://nas:49994")
 	str(fs, &g.Token, "token", "t", "bearer token (visible in ps; prefer --token-file or $BLINKENKEYS_TOKEN)")
-	fs.StringVar(&g.TokenFile, "token-file", "", "read the bearer token from this file")
+	fs.StringVar(&g.TokenFile, "token-file", g.TokenFile, "read the bearer token from this file")
 	str(fs, &g.Device, "device", "d", "device name (default: configured, or the only device)")
 	str(fs, &g.Config, "config", "C", "client config file (default ~/.config/blinkenkeys/blincli.yaml)")
 	boolean(fs, &g.Verbose, "verbose", "v", "print resolved endpoint/device/key to stderr")
@@ -30,14 +35,15 @@ func (a *app) newFlags(name string) (*flag.FlagSet, *globals) {
 	return fs, g
 }
 
+// str and boolean keep *p's current value as the default.
 func str(fs *flag.FlagSet, p *string, long, short, usage string) {
-	fs.StringVar(p, long, "", usage)
-	fs.StringVar(p, short, "", usage)
+	fs.StringVar(p, long, *p, usage)
+	fs.StringVar(p, short, *p, usage)
 }
 
 func boolean(fs *flag.FlagSet, p *bool, long, short, usage string) {
-	fs.BoolVar(p, long, false, usage)
-	fs.BoolVar(p, short, false, usage)
+	fs.BoolVar(p, long, *p, usage)
+	fs.BoolVar(p, short, *p, usage)
 }
 
 // parse parses args. done is true when the caller should return code

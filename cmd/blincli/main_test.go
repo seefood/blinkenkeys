@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -116,6 +118,60 @@ func TestDetectCommand(t *testing.T) {
 	}
 	if strings.Contains(out.String(), "token  t") {
 		t.Error("detect must not print the token")
+	}
+}
+
+func TestGlobalsBeforeCommandAreHonored(t *testing.T) {
+	f := &setFakeDaemon{}
+	srv := httptest.NewServer(f)
+	defer srv.Close()
+	tokFile := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(tokFile, []byte("tok\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// No BLINKENKEYS_URL/TOKEN: endpoint and token can only come from the
+	// pre-command -u and --token-file.
+	a, out, errb := testApp(nil)
+	code := a.run([]string{"-u", srv.URL, "--token-file", tokFile, "-d", "dev", "-v", "set", "-k", "idx:3", "-c", "red"})
+	if code != 0 {
+		t.Fatalf("code %d: %s", code, errb)
+	}
+	if w := f.writes(); len(w) != 1 || w[0].Path != "/devices/dev/keys/idx:3" {
+		t.Errorf("writes = %+v", w)
+	}
+	if !strings.Contains(errb.String(), "endpoint") {
+		t.Errorf("-v before the command was ignored; stderr %q", errb)
+	}
+
+	gf := &getFake{keys: map[string]string{"/devices/d/keys/idx:1": keyJSON}}
+	gsrv := httptest.NewServer(gf)
+	defer gsrv.Close()
+	a, out, errb = testApp(map[string]string{"BLINKENKEYS_TOKEN": "tok"})
+	if code := a.run([]string{"-q", "-u", gsrv.URL, "get", "-k", "idx:1"}); code != 0 || out.Len() != 0 {
+		t.Errorf("-q before the command: code %d, stdout %q, stderr %q", code, out, errb)
+	}
+}
+
+func TestCommandGlobalsOverridePreCommand(t *testing.T) {
+	f := &setFakeDaemon{}
+	srv := httptest.NewServer(f)
+	defer srv.Close()
+	a, _, errb := testApp(map[string]string{"BLINKENKEYS_TOKEN": "tok"})
+	code := a.run([]string{"-u", "http://127.0.0.1:9", "-d", "x", "set", "-u", srv.URL, "-d", "dev", "-k", "idx:0", "-c", "red"})
+	if code != 0 {
+		t.Fatalf("code %d: %s", code, errb)
+	}
+	if w := f.writes(); len(w) != 1 || w[0].Path != "/devices/dev/keys/idx:0" {
+		t.Errorf("writes = %+v", w)
+	}
+}
+
+func TestPreCommandParseErrorExits64(t *testing.T) {
+	for _, args := range [][]string{{"-u"}, {"--token-file"}, {"-x", "set"}, {"-d"}} {
+		a, _, errb := testApp(nil)
+		if code := a.run(args); code != exitUsage || errb.Len() == 0 {
+			t.Errorf("%v: code %d, stderr %q", args, code, errb)
+		}
 	}
 }
 

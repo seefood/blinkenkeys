@@ -42,6 +42,7 @@ type app struct {
 	stdout, stderr io.Writer
 	isTTY          func() bool
 	termEnv        termid.Env
+	pre            *globals // global options given before the command name
 }
 
 func main() {
@@ -69,10 +70,11 @@ var commands = map[string]func(*app, []string) int{
 }
 
 func (a *app) run(args []string) int {
-	fs, _ := a.newFlags("blincli")
+	fs, g := a.newFlags("blincli")
 	if code, done := a.parse(fs, args); done {
 		return code
 	}
+	a.pre = g
 	rest := fs.Args()
 	if len(rest) == 0 {
 		a.printUsage(a.stderr)
