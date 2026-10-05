@@ -63,6 +63,27 @@ func TestNoLayoutKeepsLegacyPool(t *testing.T) {
 	}
 }
 
+// SetLayout and Layout copy Tabs/Pool: neither the caller's slice nor a
+// returned one aliases the registry's copy. nil vs empty is preserved.
+func TestLayoutSlicesAreCopied(t *testing.T) {
+	r := NewRegistry()
+	tabs, pool := []uint16{0, 1}, []uint16{4, 5}
+	r.SetLayout("a", Layout{Tabs: tabs, Pool: pool})
+	tabs[0], pool[0] = 9, 9
+	got := r.Layout("a")
+	if got.Tabs[0] != 0 || got.Pool[0] != 4 {
+		t.Fatalf("SetLayout aliased the caller's slices: %+v", got)
+	}
+	got.Tabs[1], got.Pool[1] = 9, 9
+	if again := r.Layout("a"); again.Tabs[1] != 1 || again.Pool[1] != 5 {
+		t.Errorf("Layout returned the registry's own slices: %+v", again)
+	}
+	r.SetLayout("b", Layout{Pool: []uint16{}})
+	if l := r.Layout("b"); l.Pool == nil || l.Tabs != nil {
+		t.Errorf("nil/empty not preserved: Tabs %#v Pool %#v", l.Tabs, l.Pool)
+	}
+}
+
 func TestPoolKeyOwnedDirectlyIsSkipped(t *testing.T) {
 	r := registryWithCaps(t, "a", sixLEDPad())
 	r.SetLayout("a", Layout{Pool: []uint16{4, 5}})

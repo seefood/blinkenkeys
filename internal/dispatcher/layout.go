@@ -1,6 +1,10 @@
 package dispatcher
 
-import "github.com/seefood/blinkenkeys/internal/keyaddr"
+import (
+	"slices"
+
+	"github.com/seefood/blinkenkeys/internal/keyaddr"
+)
 
 // Layout is a device's key roles, by idx: (reading-order) index — see
 // config.KeyLayout. Tabs are the slots blincli maps a terminal's tab number
@@ -21,21 +25,29 @@ type Layout struct {
 var DefaultLayout = Layout{DefaultPool: true}
 
 // SetLayout records device's layout. It may be called before the device
-// exists, so config can be applied ahead of enumeration.
+// exists, so config can be applied ahead of enumeration. l's slices are
+// copied.
 func (r *Registry) SetLayout(device string, l Layout) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.layouts == nil {
 		r.layouts = make(map[string]Layout)
 	}
-	r.layouts[device] = l
+	r.layouts[device] = l.clone()
 }
 
-// Layout returns device's layout, or DefaultLayout if none was set.
+// Layout returns a copy of device's layout, or DefaultLayout if none was set.
 func (r *Registry) Layout(device string) Layout {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.layoutLocked(device)
+	return r.layoutLocked(device).clone()
+}
+
+// clone copies l's slices; slices.Clone keeps nil nil and empty empty, which
+// matters for Pool (nil vs empty are different policies).
+func (l Layout) clone() Layout {
+	l.Tabs, l.Pool = slices.Clone(l.Tabs), slices.Clone(l.Pool)
+	return l
 }
 
 func (r *Registry) layoutLocked(device string) Layout {
