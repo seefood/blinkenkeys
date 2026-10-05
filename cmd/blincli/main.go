@@ -139,7 +139,7 @@ func (a *app) session(g *globals) (*client.Client, client.Endpoint, client.FileC
 	}
 	where := ep.Socket
 	if ep.Remote() {
-		where = ep.BaseURL
+		where = client.RedactURL(ep.BaseURL)
 	}
 	a.vlog(g, "endpoint %s (%s)", where, ep.Source)
 	return client.New(ep), ep, fc, nil
@@ -213,7 +213,7 @@ func (a *app) cmdDetect(args []string) int {
 	}
 	where := ep.Socket
 	if ep.Remote() {
-		where = ep.BaseURL
+		where = client.RedactURL(ep.BaseURL)
 	}
 	_, _ = fmt.Fprintf(a.stdout, "transport  %s %s  (%s)\n", ep.Kind, where, ep.Source)
 	return exitOK

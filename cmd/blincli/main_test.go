@@ -175,6 +175,20 @@ func TestPreCommandParseErrorExits64(t *testing.T) {
 	}
 }
 
+func TestURLUserinfoNeverPrinted(t *testing.T) {
+	const u = "http://user:PASSWD@127.0.0.1:9"
+	a, out, errb := testApp(map[string]string{"BLINKENKEYS_TOKEN": "tok"})
+	a.run([]string{"-v", "-u", u, "set", "-d", "d", "-k", "idx:0", "-c", "red"})
+	if !strings.Contains(errb.String(), "endpoint") || strings.Contains(out.String()+errb.String(), "PASSWD") {
+		t.Errorf("-v set leaked userinfo or logged nothing:\nstdout %s\nstderr %s", out, errb)
+	}
+	a, out, errb = testApp(map[string]string{"BLINKENKEYS_URL": u, "BLINKENKEYS_TOKEN": "tok", "KITTY_WINDOW_ID": "4"})
+	if code := a.run([]string{"detect"}); code != 0 || !strings.Contains(out.String(), "127.0.0.1:9") ||
+		strings.Contains(out.String()+errb.String(), "PASSWD") {
+		t.Errorf("detect leaked userinfo (code %d):\nstdout %s\nstderr %s", code, out, errb)
+	}
+}
+
 func TestDetectWithNothingStillReports(t *testing.T) {
 	a, out, _ := testApp(map[string]string{"BLINKENKEYS_SOCKET": "/x.sock"})
 	if code := a.run([]string{"detect"}); code != 0 || !strings.Contains(out.String(), "none") {
