@@ -49,8 +49,49 @@ func (c *Config) ClaimIdleTimeout() time.Duration {
 // assigns (hid.BaseName); Optional pre-declares the device so writes to it
 // succeed before it's first seen, and exempts it from untethered eviction.
 type DeviceDecl struct {
-	ID       string `yaml:"id"`
-	Optional bool   `yaml:"optional"`
+	ID       string     `yaml:"id"`
+	Optional bool       `yaml:"optional"`
+	Keys     *KeyLayout `yaml:"keys,omitempty"`
+}
+
+// KeyLayout assigns roles to a device's keys, by idx: (reading-order) index.
+// Tabs are the slots a terminal's tab number maps onto, in order (tab N ->
+// Tabs[(N-1) mod len]). Pool is where the daemon auto-assigns named claims
+// from; nil (omitted) means "the default pool" (every key with row >= 1 not
+// in Tabs), an explicit empty list means no pool. Keys in neither list are
+// never touched by tab slots or the pool.
+type KeyLayout struct {
+	Tabs KeyList `yaml:"tabs"`
+	Pool KeyList `yaml:"pool"`
+	// Collision says what a direct (location-addressed) write does to a
+	// named claim sitting on the key it targets: "last-wins" (default, ""):
+	// the claim is released; "displace": the claim moves to the next
+	// unclaimed pool key.
+	Collision string `yaml:"collision"`
+}
+
+func (l *KeyLayout) validate() error {
+	switch l.Collision {
+	case "", "last-wins", "displace":
+	default:
+		return fmt.Errorf("collision %q: want last-wins or displace", l.Collision)
+	}
+	owner := make(map[uint16]string)
+	for _, role := range []struct {
+		name string
+		keys KeyList
+	}{{"tabs", l.Tabs}, {"pool", l.Pool}} {
+		for _, k := range role.keys {
+			if prev, dup := owner[k]; dup {
+				if prev == role.name {
+					return fmt.Errorf("idx %d listed twice in %s", k, role.name)
+				}
+				return fmt.Errorf("idx %d is in both %s and %s", k, prev, role.name)
+			}
+			owner[k] = role.name
+		}
+	}
+	return nil
 }
 
 // NamingRule selects blinkenkeysd's preferred device-naming strategy; it still
@@ -129,6 +170,11 @@ func Load(path string) (*Config, error) {
 			return nil, fmt.Errorf("config: devices[%d].id %q is all digits, which is ambiguous with a device ordinal", i, d.ID)
 		case seen[d.ID]:
 			return nil, fmt.Errorf("config: devices[%d].id %q is duplicated", i, d.ID)
+		}
+		if d.Keys != nil {
+			if err := d.Keys.validate(); err != nil {
+				return nil, fmt.Errorf("config: devices[%d].keys: %w", i, err)
+			}
 		}
 		seen[d.ID] = true
 	}
