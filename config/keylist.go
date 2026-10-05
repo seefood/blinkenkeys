@@ -84,7 +84,7 @@ func parseKeyString(s string) (KeyList, error) {
 			}
 		}
 		for n := a; n <= b; n++ {
-			out = append(out, uint16(n))
+			out = append(out, uint16(n)) // #nosec G115 -- a and b are parsed with bitSize 16, so n <= b <= 65535
 		}
 	}
 	return out, nil
