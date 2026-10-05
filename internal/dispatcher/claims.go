@@ -60,13 +60,13 @@ func (r *Registry) ClaimOrGet(device, name string, now time.Time) (uint16, error
 	if !ok {
 		return 0, ErrDeviceNotFound
 	}
-	return claimOrGetLocked(s, name, now)
+	return claimOrGetLocked(s, r.layoutLocked(device), name, now)
 }
 
 // claimOrGetLocked is ClaimOrGet's core, callers must already hold r.mu —
 // used directly by SetCaps, which resolves pending writes while still
 // holding the lock it took to store the new capabilities.
-func claimOrGetLocked(s *slot, name string, now time.Time) (uint16, error) {
+func claimOrGetLocked(s *slot, l Layout, name string, now time.Time) (uint16, error) {
 	if s.caps == nil {
 		return 0, ErrCapsUnknown
 	}
@@ -75,7 +75,7 @@ func claimOrGetLocked(s *slot, name string, now time.Time) (uint16, error) {
 		s.claims[name] = c
 		return c.index, nil
 	}
-	idx, ok := nextUnclaimedLocked(s)
+	idx, ok := nextUnclaimedLocked(s, l)
 	if !ok {
 		return 0, ErrNoUnclaimedKeys
 	}
@@ -93,9 +93,9 @@ func claimOrGetLocked(s *slot, name string, now time.Time) (uint16, error) {
 // resolveLocked maps addr to an LED index given s's already-known
 // capabilities: a Name addr claims (or reuses) a pooled key; any other form
 // resolves against the matrix. Callers hold r.mu.
-func resolveLocked(s *slot, addr keyaddr.Address, now time.Time) (uint16, error) {
+func resolveLocked(s *slot, l Layout, addr keyaddr.Address, now time.Time) (uint16, error) {
 	if addr.Kind == keyaddr.Name {
-		return claimOrGetLocked(s, addr.Name, now)
+		return claimOrGetLocked(s, l, addr.Name, now)
 	}
 	idx, ok := keyaddr.Resolve(addr, s.caps.LEDCount, s.caps.Positions)
 	if !ok {
@@ -104,10 +104,26 @@ func resolveLocked(s *slot, addr keyaddr.Address, now time.Time) (uint16, error)
 	return idx, nil
 }
 
-// nextUnclaimedLocked returns the lowest-index eligible key (row >= 1,
-// ascending row/col order, excluding LEDs with no matrix key) not already
-// owned by a name or a direct claim. Callers hold r.mu.
-func nextUnclaimedLocked(s *slot) (uint16, bool) {
+// nextUnclaimedLocked returns the next key a new name may claim: with an
+// explicit pool, the first listed idx: key that is on the matrix and not
+// already owned; with the default pool, the lowest-index row >= 1 key (row/
+// col order, excluding LEDs with no matrix key) that is neither owned nor a
+// tab slot. Callers hold r.mu.
+func nextUnclaimedLocked(s *slot, l Layout) (uint16, bool) {
+	if !l.DefaultPool {
+		for _, n := range l.Pool {
+			led, ok := keyaddr.Resolve(keyaddr.Address{Kind: keyaddr.Idx, N: n}, s.caps.LEDCount, s.caps.Positions)
+			if !ok {
+				continue
+			}
+			if _, owned := s.owners[led]; owned {
+				continue
+			}
+			return led, true
+		}
+		return 0, false
+	}
+	tabs := ledsOf(s, l.Tabs)
 	positions := append([]LEDPosition(nil), s.caps.Positions...)
 	sort.Slice(positions, func(i, j int) bool {
 		if positions[i].Row != positions[j].Row {
@@ -116,7 +132,7 @@ func nextUnclaimedLocked(s *slot) (uint16, bool) {
 		return positions[i].Col < positions[j].Col
 	})
 	for _, p := range positions {
-		if p.Row == 0 || p.Row == noMatrixKeyRowCol {
+		if p.Row == 0 || p.Row == noMatrixKeyRowCol || tabs[p.Index] {
 			continue
 		}
 		if _, owned := s.owners[p.Index]; owned {
