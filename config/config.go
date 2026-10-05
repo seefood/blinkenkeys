@@ -57,7 +57,7 @@ type DeviceDecl struct {
 // KeyLayout assigns roles to a device's keys, by idx: (reading-order) index.
 // Tabs are the slots a terminal's tab number maps onto, in order (tab N ->
 // Tabs[(N-1) mod len]). Pool is where the daemon auto-assigns named claims
-// from; nil (omitted) means "the default pool" (every key with row >= 1 not
+// from; nil (omitted or YAML null) means "the default pool" (every key with row >= 1 not
 // in Tabs), an explicit empty list means no pool. Keys in neither list are
 // never touched by tab slots or the pool.
 type KeyLayout struct {

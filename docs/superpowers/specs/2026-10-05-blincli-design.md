@@ -167,7 +167,8 @@ devices:
 
 Key lists accept single indexes and ranges combined, as a YAML list or one string:
 `[0-4, 6, 8-10]` or `"0-4,6,8-10"`. Order is preserved as written (it matters for `tabs`);
-a range ascends. `pool: []` means no pool (named claims always use shared placement).
+a range ascends. `pool: []` means no pool (named claims always use shared placement); a YAML
+null (`pool: ~`, `pool: null`, bare `pool:`) is the same as omitting `pool`.
 
 - Absent `keys:` keeps today's behavior (pool = every key with row >= 1; `tabs` unset, so the
   client falls back to idx 0..slots-1 with slots = 6). `keys:` present with `pool` omitted:

@@ -38,8 +38,40 @@ func TestKeyListOmittedStaysNil(t *testing.T) {
 	var got struct {
 		K KeyList `yaml:"k"`
 	}
-	if err := yaml.Unmarshal([]byte("other: 1"), &got); err == nil && got.K != nil {
+	if err := yaml.Unmarshal([]byte("other: 1"), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.K != nil {
 		t.Errorf("omitted key decoded to %#v, want nil", got.K)
+	}
+}
+
+// A YAML null (`pool: ~`, `pool: null`, bare `pool:`) means "unset", the same
+// as omitting the key: for pool that is the default pool, not an empty one.
+func TestKeyListNullIsUnset(t *testing.T) {
+	for _, src := range []string{"k: ~", "k: null", "k:"} {
+		var got struct {
+			K KeyList `yaml:"k"`
+		}
+		if err := yaml.Unmarshal([]byte(src), &got); err != nil {
+			t.Fatalf("%q: unmarshal: %v", src, err)
+		}
+		if got.K != nil {
+			t.Errorf("%q decoded to %#v, want nil (unset)", src, got.K)
+		}
+	}
+	// goccy/go-yaml skips the unmarshaler for a null today; if a decoder ever
+	// passes one through, UnmarshalYAML itself must still say "unset".
+	k := KeyList{1}
+	if err := k.UnmarshalYAML(func(any) error { return nil }); err != nil || k != nil {
+		t.Errorf("UnmarshalYAML(null) = %#v, %v; want nil", k, err)
+	}
+	cfg, err := Load(writeConfig(t, "devices:\n  - id: a\n    keys:\n      tabs: [0-1]\n      pool: ~\n"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Devices[0].Keys.Pool != nil {
+		t.Errorf("pool: ~ must mean the default pool (nil), got %#v", cfg.Devices[0].Keys.Pool)
 	}
 }
 

@@ -9,8 +9,9 @@ import (
 // KeyList is an ordered list of idx: (reading-order) key indexes. In YAML it
 // is either a list whose items are integers or ranges ("[0-4, 6, 8-10]") or
 // one string ("0-4,6,8-10"). Order is preserved as written. A key present
-// but empty decodes to a non-nil empty KeyList; an omitted key stays nil, so
-// callers can tell "no keys" from "unset".
+// but empty ([] or "") decodes to a non-nil empty KeyList; an omitted key or
+// a YAML null (~, null, bare "k:") stays nil, so callers can tell "no keys"
+// from "unset".
 type KeyList []uint16
 
 // UnmarshalYAML implements goccy/go-yaml's InterfaceUnmarshaler.
@@ -31,7 +32,7 @@ func parseKeyList(raw any) (KeyList, error) {
 	out := KeyList{}
 	switch v := raw.(type) {
 	case nil:
-		return out, nil
+		return nil, nil // YAML null: unset, same as omitted
 	case string:
 		return parseKeyString(v)
 	case []any:
