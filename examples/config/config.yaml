@@ -16,6 +16,10 @@ devices:
   - id: "macropad" # replace with a name of your choosing; find your
     optional: false # device's uid via `curl --unix-socket .../api.sock
     # http://localhost/devices` after first connecting it
+    # keys:                 # optional per-device key roles, by idx (reading-order) index
+    #   tabs: [0-5]         # blincli maps terminal tab N -> tabs[(N-1) mod len]
+    #   pool: [6-11]        # named claims are auto-assigned from here; [] = none
+    #   collision: last-wins   # or displace: a direct write pushes a named claim to the next free pool key
 
 claims:
   idle_timeout: "8h"

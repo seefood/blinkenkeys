@@ -76,11 +76,7 @@ func main() {
 	defer func() { _ = goHid.Exit() }()
 
 	registry := dispatcher.NewRegistry()
-	for _, d := range cfg.Devices {
-		if d.Optional {
-			registry.Declare(d.ID)
-		}
-	}
+	declareDevices(registry, cfg.Devices)
 	cache := dispatcher.NewCache()
 	disp := dispatcher.New(registry, cache, dispatcherQueueDepth, logger)
 
@@ -110,7 +106,7 @@ func main() {
 				logger.Warn("blank-on-idle-sweep failed", "device", device, "index", index, "err", err)
 			}
 		})
-	handler := api.NewHandler(disp, engine, lib, logger)
+	handler := newAPIHandler(disp, engine, lib, cfg, logger)
 
 	// socketPath comes from config.yaml's listeners.socket.path or the
 	// $HOME-derived default — gosec's taint analysis treats config files as
@@ -163,6 +159,37 @@ func main() {
 		logger.Error("http server exited", "err", err)
 		os.Exit(1)
 	}
+}
+
+// layoutFor converts a config device entry's keys: block into the
+// dispatcher's Layout. ok is false when the entry has no keys: block (the
+// device then keeps dispatcher.DefaultLayout).
+func layoutFor(d config.DeviceDecl) (dispatcher.Layout, bool) {
+	if d.Keys == nil {
+		return dispatcher.Layout{}, false
+	}
+	return dispatcher.Layout{Tabs: d.Keys.Tabs, Pool: d.Keys.Pool, DefaultPool: d.Keys.Pool == nil, Displace: d.Keys.Collision == "displace"}, true
+}
+
+// declareDevices pre-declares optional devices and applies each entry's
+// keys: layout to the registry.
+func declareDevices(registry *dispatcher.Registry, devices []config.DeviceDecl) {
+	for _, d := range devices {
+		if d.Optional {
+			registry.Declare(d.ID)
+		}
+		if l, ok := layoutFor(d); ok {
+			registry.SetLayout(d.ID, l)
+		}
+	}
+}
+
+// newAPIHandler builds the REST handler, reporting claim expiry per
+// claims.idle_timeout.
+func newAPIHandler(disp *dispatcher.Dispatcher, engine *effects.Engine, lib *effects.Library, cfg *config.Config, logger *slog.Logger) *api.Handler {
+	h := api.NewHandler(disp, engine, lib, logger)
+	h.SetClaimIdleTimeout(cfg.ClaimIdleTimeout())
+	return h
 }
 
 // newTCPServer builds blinkenkeysd's optional TCP listener and its

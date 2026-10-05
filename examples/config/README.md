@@ -47,6 +47,11 @@ devices:
     optional: false      # true = writes to this name succeed even before
                           # the device has ever been seen, and it's exempt
                           # from untethered-device eviction
+    # keys:                 # optional per-device key roles, by idx (reading-order) index
+    #   tabs: [0-5]         # tab-number slots, in order; list items are idx numbers or ranges, e.g. [0-4, 6, 8-10] or "0-4,6"
+    #   pool: [6-11]        # keys named claims may be auto-assigned from; omitted = every row>=1 key not in tabs; [] = no pool
+    #   collision: last-wins   # last-wins (default) — a direct write releases a named claim on its key; displace — the claim moves to the next unclaimed pool key (effects restart there; a full pool falls back to last-wins)
+    #   # keys in neither list are never touched
 
 claims:
   idle_timeout: "8h"      # Go duration string; "" = default "8h"
@@ -139,5 +144,17 @@ in the REST path can reference any `program/state` at write time.
 - anything else — a claimed key **name** (Phase 5's per-client pool; see
   `integrations/claude/README.md`)
 
-`DELETE /devices/{name}/keys/{pos}` only works on a key **name** — it
-releases the claim (and blanks the key) rather than writing a color.
+`DELETE /devices/{name}/keys/{pos}` blanks the key (cancelling any running effect)
+and, if `{pos}` is a **name**, releases its claim. Any `{pos}` form is accepted.
+Add `?owner=TAG` to make it conditional: it does nothing (204) if the key's
+recorded owner (the `owner` given on the last write) is a different tag.
+
+`PUT` bodies accept an optional `"owner": "<tag>"` (1–128 bytes) next to the
+one of `color`/`effect`/`state`. It is only recorded, for the conditional
+`DELETE` and for `GET`.
+
+`GET /devices/{name}/keys/{pos}` returns the key's registration and state
+(404 if it was never written/claimed); `GET /devices/{name}/keys` lists all
+of them. The `color` it reports is the daemon's frame buffer (the desired
+value) — VialRGB cannot be read back. `GET /devices/{name}` now also reports
+`layout.tabs` when configured. Status is in-memory only and resets on restart.
