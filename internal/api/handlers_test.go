@@ -38,9 +38,13 @@ type fakeDispatcher struct {
 	disconnected bool
 	canonCalls   int // Canonical claims/marks as a side effect; read paths must leave this 0
 	owned        []uint16
+	infoCalls    int
 }
 
-func (f *fakeDispatcher) KeyInfo(string, uint16) dispatcher.KeyInfo { return f.info }
+func (f *fakeDispatcher) KeyInfo(string, uint16) dispatcher.KeyInfo {
+	f.infoCalls++
+	return f.info
+}
 func (f *fakeDispatcher) OwnedLEDs(string) []uint16                 { return f.owned }
 func (f *fakeDispatcher) CurrentColor(string, uint16) (color.HSV, bool) {
 	if f.curColor == nil {

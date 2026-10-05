@@ -167,6 +167,21 @@ func TestListKeysIncludesOwnedWithoutRecord(t *testing.T) {
 	}
 }
 
+// T10: one KeyInfo read per GET, so the view and the registration check
+// can't disagree about the same key.
+func TestGetKeyReadsKeyInfoOnce(t *testing.T) {
+	led := keyaddr.Address{Kind: keyaddr.LED, N: 3}
+	disp := knownPad()
+	disp.lookupAddr = &led
+	disp.info = dispatcher.KeyInfo{Direct: true}
+	if rec := get(NewHandler(disp, &fakeWriter{}, &fakeLibrary{}, nil), "/devices/0/keys/idx:3"); rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; %s", rec.Code, rec.Body)
+	}
+	if disp.infoCalls != 1 {
+		t.Errorf("KeyInfo calls = %d, want 1", disp.infoCalls)
+	}
+}
+
 func TestGetKeyReportsFailedEffect(t *testing.T) {
 	led := keyaddr.Address{Kind: keyaddr.LED, N: 3}
 	disp := knownPad()

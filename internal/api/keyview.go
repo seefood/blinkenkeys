@@ -84,8 +84,10 @@ type keyView struct {
 
 // buildView assembles led's view. label is how the caller addressed it; a
 // name-claimed key is always labelled with its claimed name. Read-only.
-func (h *Handler) buildView(device string, led uint16, label string, now time.Time) keyView {
-	info := h.disp.KeyInfo(device, led)
+// info is the caller's single KeyInfo read for led. The view is still not a
+// consistent snapshot: KeyInfo, CurrentColor and Status are separate reads of
+// the registry, cache and engine, and a concurrent write can land between them.
+func (h *Handler) buildView(device string, led uint16, label string, info dispatcher.KeyInfo, now time.Time) keyView {
 	v := keyView{Device: device, Key: label, Kind: "direct", LED: led, Connected: h.disp.Connected(device)}
 	if info.Name != "" {
 		v.Kind, v.Key = "name", info.Name
@@ -130,12 +132,11 @@ func (h *Handler) getKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := time.Now()
-	view := h.buildView(device, led.N, addr.String(), now)
-	if addr.Kind != keyaddr.Name && view.Source == nil && view.Kind == "direct" {
-		if info := h.disp.KeyInfo(device, led.N); !info.Direct {
-			writeError(w, http.StatusNotFound, fmt.Errorf("%w: %s is not registered", dispatcher.ErrKeyNotFound, addr))
-			return
-		}
+	info := h.disp.KeyInfo(device, led.N)
+	view := h.buildView(device, led.N, addr.String(), info, now)
+	if addr.Kind != keyaddr.Name && view.Source == nil && view.Kind == "direct" && !info.Direct {
+		writeError(w, http.StatusNotFound, fmt.Errorf("%w: %s is not registered", dispatcher.ErrKeyNotFound, addr))
+		return
 	}
 	writeJSON(w, http.StatusOK, view)
 }
@@ -160,7 +161,7 @@ func (h *Handler) listKeys(w http.ResponseWriter, r *http.Request) {
 	}
 	views := []keyView{}
 	for led := range leds {
-		views = append(views, h.buildView(device, led, keyaddr.Address{Kind: keyaddr.LED, N: led}.String(), now))
+		views = append(views, h.buildView(device, led, keyaddr.Address{Kind: keyaddr.LED, N: led}.String(), h.disp.KeyInfo(device, led), now))
 	}
 	sort.Slice(views, func(i, j int) bool { return views[i].LED < views[j].LED })
 	writeJSON(w, http.StatusOK, views)
