@@ -35,7 +35,7 @@ blincli devices [REF] [--json]
 `set` takes exactly one of `-c/--color` (hex, `H,S,V` in QMK 0-255, or a CSS/X11 name),
 `-e/--effect`, `-s/--state` — the API's exactly-one-of body. `-k/--key` takes any API `{pos}`
 form (`R,C`, `led:N`, `idx:N`, or a name). `-n/--name NAME` forces a named (pooled) registration.
-`-m/--slots N` is the tab-slot modulus (default 6; `slots:` in the client config).
+`-m/--slots N` is the tab-slot modulus (override only; the default comes from the device's key layout, see below, falling back to 6).
 `--if-detected`: opt-in; exit 0 silently if no key can be derived (replaces the old
 `[ -n "$WEZTERM_PANE" ] && ... || true` guard). Without it, an underivable key is an error.
 
@@ -88,12 +88,17 @@ Order, first match wins:
    reference device tabs 1-6 land on row 0 plus the first two row-1 keys (the user's
    Option-1..6 iTerm tab-switch keys); idx 6-11 are reserved by the user for other functions
    and are never written by tab slots. Tabs beyond `slots` wrap and can collide (see below).
-4. **Named registration fallback.** No tab number obtainable: claim a pool key under a name
-   derived from the first unique id found in the environment, in this order:
-   terminal instance id (`wezterm-17`, `kitty-4`, ...; see table), then `$BLINKENKEYS_NAME`,
-   then `$CLAUDE_CODE_SESSION_ID` (verified: already used by `hooks-basic.json`), then other
-   known session ids **[unverified]**: `$ZELLIJ_PANE_ID`, `$STY` (GNU screen),
-   `$WT_SESSION` (Windows Terminal), `$TERM_SESSION_ID` (Apple Terminal/iTerm).
+4. **Named fallback.** No tab number obtainable: derive a name from the first unique id found
+   in the environment, in this order: terminal instance id (`wezterm-17`, `kitty-4`, ...; see
+   table), then `$BLINKENKEYS_NAME`, then `$CLAUDE_CODE_SESSION_ID` (verified: already used by
+   `hooks-basic.json`), then other known session ids **[unverified]**: `$ZELLIJ_PANE_ID`,
+   `$STY` (GNU screen), `$WT_SESSION` (Windows Terminal), `$TERM_SESSION_ID`. The name is then
+   placed according to the device's layout:
+   - the layout's `pool` is non-empty: ordinary named claim (daemon auto-assigns from the pool);
+   - the `pool` is empty (the user's pad: idx 6-11 are media keys): **shared** placement — the
+     client writes directly to `tabs[fnv1a(name) mod len(tabs)]` with `owner` = the name. Same
+     name always lands on the same key (no state, no leaked claim); collisions with tab slots
+     or other names follow the owner-tag policy below.
 5. **No unique id anywhere** (no `-k`/`-n`, nothing in the env above): error, exit 64, with a
    message listing `-k`, `-n`, and the env vars checked. Never guess an identity (no tty-path or
    pid heuristics). `--if-detected` turns this into a silent exit 0.
@@ -131,6 +136,29 @@ Two sessions can map to one slot (tab 13 vs tab 1; `w0t0` vs `w1t0` in iTerm). P
   ending therefore never blanks a key another session has since taken.
 
 This policy is a recommendation not yet explicitly confirmed by the user.
+
+## Per-device key layout (daemon `config.yaml`)
+
+Every pad differs, so which keys play which role is configuration, not code. New optional
+`keys:` block on a `devices:` entry (key lists use `idx:` reading-order numbers; ranges allowed):
+
+```yaml
+devices:
+  - id: macropad
+    keys:
+      tabs: [0-5]    # tab-number slots, in order; tab N -> tabs[(N-1) mod len]
+      pool: []       # keys the daemon may auto-assign to named claims; empty = none
+      # every other key (idx 6-11, media keys) is never touched by tabs or the pool
+```
+
+- Absent `keys:` keeps today's behavior (pool = every key with row >= 1; `tabs` unset, so the
+  client falls back to idx 0..slots-1 with slots = 6).
+- The daemon enforces it: `nextUnclaimedLocked` only offers `pool` keys; writes the daemon
+  receives for a key outside `tabs` and `pool` are still allowed (explicit `-k` always works).
+- `GET /devices/{name}` (capabilities) gains `layout: {tabs, pool}` so a remote `blincli`
+  needs no local layout config; `-m/--slots` and `slots:` only override.
+- Config validation: indexes must be unique across `tabs` and `pool`; `idx:` values beyond the
+  device's key count are rejected once capabilities are known.
 
 ## `get` and the API enhancement
 
@@ -186,17 +214,11 @@ registered · 69 daemon unreachable · 77 auth missing/rejected · 78 no config/
   `blincli set -s claude/{idle,working,waiting} --if-detected` and `blincli clear --if-detected`.
 - `integrations/claude/README.md`: blincli section; `hooks-wezterm-pane.json` and its section
   stay as the raw-curl example.
-- The pool-conflict note: direct (`idx:`) writes permanently take a key out of the named-claim
-  pool, so any tab slot overlaps pool keys (row >= 1) that named claims (step 4) might hand out; and
-  the pool knows nothing of the user's reserved idx 6-11. **Open: daemon-side pool exclusion
-  (see Open items).**
+- Daemon config: per-device key layout (next section).
 
 ## Open items
 
-- Named-claim pool vs. the keypad layout: `nextUnclaimedLocked` hands out the lowest-index
-  row >= 1 key not yet owned. That is idx 4-5 (tab slots 5-6, until first written) and then
-  idx 6-11 (reserved for other functions). The daemon needs a way to restrict the pool (e.g.
-  a `claims.pool` / `claims.reserved` setting in `config.yaml`), and the device may have no
-  keys left for named claims at all. Depends on the device's key count; unresolved.
+- Interpretation to confirm: "named sessions start at idx 6" vs. "idx 6-11 are media keys": this
+  spec reads it as *pool is empty on this pad, names share the tab slots*.
 - Owner-tag collision policy: pending explicit confirmation.
 - All **[unverified]** entries: verify before implementing the corresponding piece.
