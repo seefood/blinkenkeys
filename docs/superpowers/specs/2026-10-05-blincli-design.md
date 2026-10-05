@@ -183,7 +183,9 @@ null (`pool: ~`, `pool: null`, bare `pool:`) is the same as omitting `pool`.
 - The daemon enforces it: `nextUnclaimedLocked` only offers `pool` keys; writes the daemon
   receives for a key outside `tabs` and `pool` are still allowed (explicit `-k` always works).
 - `GET /devices/{name}` (capabilities) gains `layout: {tabs, pool}` so a remote `blincli`
-  needs no local layout config; `-m/--slots` and `slots:` only override.
+  needs no local layout config; `-m/--slots` and `slots:` only override. The full shape is
+  `layout: {tabs, pool, collision}`: `pool` is omitted for the default pool and `[]` when
+  configured empty; `collision` is always present (`last-wins` or `displace`).
 - Config validation: indexes must be unique across `tabs` and `pool`. `idx:` values beyond the
   device's key count are **not** a hard validation (capabilities are unknown at config load):
   out-of-range `pool` entries are skipped at claim time, and a tab-slot write to an out-of-range

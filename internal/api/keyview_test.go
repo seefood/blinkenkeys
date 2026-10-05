@@ -169,6 +169,32 @@ func TestGetKeyReportsFailedEffect(t *testing.T) {
 	}
 }
 
+// layout.pool: omitted for the default pool, [] for an explicitly empty one,
+// the list otherwise; layout.collision is always present.
+func TestCapabilitiesLayoutPoolAndCollision(t *testing.T) {
+	cases := []struct {
+		name   string
+		layout dispatcher.Layout
+		want   string
+	}{
+		{"default", dispatcher.DefaultLayout, `{"collision":"last-wins"}`},
+		{"explicit pool, displace", dispatcher.Layout{Tabs: []uint16{0, 1}, Pool: []uint16{6, 7}, Displace: true}, `{"tabs":[0,1],"pool":[6,7],"collision":"displace"}`},
+		{"empty pool", dispatcher.Layout{Pool: []uint16{}}, `{"pool":[],"collision":"last-wins"}`},
+		{"nil pool, not default", dispatcher.Layout{}, `{"pool":[],"collision":"last-wins"}`},
+	}
+	for _, c := range cases {
+		disp := knownPad()
+		disp.layout = c.layout
+		rec := get(NewHandler(disp, &fakeWriter{}, &fakeLibrary{}, nil), "/devices/0")
+		var got struct {
+			Layout json.RawMessage `json:"layout"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil || string(got.Layout) != c.want {
+			t.Errorf("%s: layout = %s, %v; want %s", c.name, got.Layout, err, c.want)
+		}
+	}
+}
+
 func TestCapabilitiesIncludeLayout(t *testing.T) {
 	disp := knownPad()
 	disp.caps = dispatcher.Capabilities{LEDCount: 12}

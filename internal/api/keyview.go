@@ -15,9 +15,27 @@ import (
 // blincli uses to map tab numbers to keys.
 type capsView struct {
 	dispatcher.Capabilities
-	Layout struct {
-		Tabs []uint16 `json:"tabs,omitempty"`
-	} `json:"layout"`
+	Layout layoutView `json:"layout"`
+}
+
+// layoutView mirrors dispatcher.Layout. Pool is omitted for the default pool
+// and [] for an explicitly empty one, so clients can tell the two apart.
+type layoutView struct {
+	Tabs      []uint16  `json:"tabs,omitempty"`
+	Pool      *[]uint16 `json:"pool,omitempty"`
+	Collision string    `json:"collision"` // "last-wins" or "displace"
+}
+
+func newLayoutView(l dispatcher.Layout) layoutView {
+	v := layoutView{Tabs: l.Tabs, Collision: "last-wins"}
+	if l.Displace {
+		v.Collision = "displace"
+	}
+	if !l.DefaultPool {
+		pool := append([]uint16{}, l.Pool...)
+		v.Pool = &pool
+	}
+	return v
 }
 
 type colorView struct {

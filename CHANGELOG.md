@@ -174,4 +174,5 @@ model" section)
   lit before the restart (records are in-memory only). Key views report
   `effect.failed: true` when the engine stopped an effect after a write
   failure. A YAML null key list (`pool: ~`) means unset (the default pool),
-  same as omitting it.
+  same as omitting it. The capabilities `layout` now also reports `pool`
+  (omitted for the default pool, `[]` when configured empty) and `collision`.

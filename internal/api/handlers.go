@@ -357,7 +357,6 @@ func (h *Handler) getCapabilities(w http.ResponseWriter, r *http.Request) {
 		writeError(w, statusFor(err), err)
 		return
 	}
-	view := capsView{Capabilities: caps}
-	view.Layout.Tabs = h.disp.Layout(device).Tabs
+	view := capsView{Capabilities: caps, Layout: newLayoutView(h.disp.Layout(device))}
 	writeJSON(w, http.StatusOK, view)
 }
