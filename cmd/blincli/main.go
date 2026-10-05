@@ -115,6 +115,9 @@ func exitCode(err error) int {
 
 // fail prints err and returns its exit code.
 func (a *app) fail(err error) int {
+	if err == nil {
+		return exitOK
+	}
 	_, _ = fmt.Fprintln(a.stderr, err)
 	return exitCode(err)
 }
