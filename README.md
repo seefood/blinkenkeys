@@ -22,7 +22,7 @@ Requires Go 1.27+, a C compiler (cgo), and on Linux the `libudev-dev`
 headers. Build the binary first:
 
 ```bash
-make build   # produces bin/blinkenkeysd
+make build   # produces bin/blinkenkeysd and bin/blincli
 ```
 
 **Linux:** `packaging/linux/install.sh` installs the binary, a udev rule
@@ -64,6 +64,24 @@ touching your `~/.config/blinkenkeys/` config or
 `~/.local/state/blinkenkeys/` runtime data. See
 [`docs/superpowers/manual-checks/phase2-5-macos-install.md`](docs/superpowers/manual-checks/phase2-5-macos-install.md)
 for the full install/uninstall verification checklist.
+
+## blincli
+
+`blincli` is a small pure-Go client for the daemon's API; it finds the
+daemon, picks a key from your terminal tab, and is what Claude Code hooks
+call:
+
+```bash
+blincli set -s claude/idle   # state on this terminal's key
+blincli get                  # what is on this key, and for how long
+```
+
+`make build` produces it as `bin/blincli` and the installers put it next to
+`blinkenkeysd`. Each device can declare a key layout (`keys.tabs` for terminal
+tab slots, `keys.pool` for named claims) and a `keys.collision` policy:
+`last-wins` (default) or `displace`. See
+[`integrations/claude/README.md`](integrations/claude/README.md) and the
+[design spec](docs/superpowers/specs/2026-10-05-blincli-design.md).
 
 ## Scratching my itch
 

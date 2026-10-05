@@ -149,3 +149,20 @@ model" section)
   if `config.yaml` doesn't already exist, and that check ignores `--force` —
   the config is user data the moment it's written, same as `uninstall.sh`'s
   existing "never touch `~/.config/blinkenkeys/`" rule.
+
+## blincli design (`docs/superpowers/specs/2026-10-05-blincli-design.md`)
+
+- **2026-10-05**: Daemon-side groundwork for the `blincli` client.
+  `GET /devices/{name}/keys/{key}` and `GET /devices/{name}/keys` expose a
+  key's source, running effect, current color and age (without claiming
+  unknown names). `PUT` accepts an `owner` tag and `DELETE` takes an optional
+  `?owner=` that makes the release conditional (mismatch is a 204 no-op);
+  `DELETE` now also accepts direct addresses (`idx:N`, `R,C`), which
+  previously returned 400. Per-device `keys:` layout in `config.yaml`
+  (`tabs`, `pool`, `collision: last-wins | displace`), also reported in the
+  capabilities response as `layout`. The effects engine keeps in-memory status
+  records (not persisted across restarts). Deliberate deviation from the spec:
+  `idx` values beyond the device's key count are not a hard validation;
+  out-of-range pool entries are skipped at claim time and an out-of-range tab
+  slot write returns 404. Writes queued before capabilities are known
+  (`applyPending`) always use last-wins, even under `displace`.

@@ -2,7 +2,7 @@
 
 Hook examples wiring Claude Code session state into `blinkenkeysd`. This
 directory will grow as more hook-driven integrations are added — these are
-the first two.
+the first three.
 
 ## Prerequisites
 
@@ -15,7 +15,11 @@ the first two.
    ```
    Every command below is hardcoded to `uid-440d6644c3b0438c` — replace it
    with your own device's `name` from that response.
-3. Merge the `hooks` object from one of the two JSON files below into your
+3. For `hooks-blincli.json` only: install `blincli` (`make build`, then
+   `packaging/<os>/install.sh`) and run `blincli config init` if the daemon
+   is remote; for a local daemon nothing is needed. (Steps 1-2's hardcoded
+   device name does not apply to it.)
+4. Merge the `hooks` object from one of the JSON files below into your
    `.claude/settings.json` (or `.claude/settings.local.json` for a
    machine-local, not-checked-in setup).
 
@@ -49,8 +53,35 @@ section — so you don't pick a key yourself; a session just claims the next
 free one and keeps it (refreshed on every write, released after 8h idle or
 on `SessionEnd`).
 
+## `hooks-blincli.json`
+
+The same five events, driven through the `blincli` client instead of raw
+`curl`. No device name or socket path appears in the commands; `blincli`
+finds the daemon and device itself (`blincli config show` prints what it
+resolved). Commands are plain `blincli set -s claude/{idle,working,waiting}`
+and `blincli clear`, with no `--if-detected`: inside Claude Code
+`$CLAUDE_CODE_SESSION_ID` is always set, so a key is always derivable and a
+real misconfiguration should surface as a non-blocking hook error.
+
+- **Key = terminal tab slot.** Tabs 1-N of iTerm2, tmux and WezTerm map onto
+  the device's `keys.tabs` list (configure it per `examples/config/README.md`).
+- **Fallback:** if no tab number can be determined, the key is a named claim
+  derived from the terminal pane id or `$CLAUDE_CODE_SESSION_ID`.
+- **Empty pool:** with `pool: []` there is nothing to claim from, so the
+  session shares a tab slot.
+- **Collisions:** the per-device `keys.collision` setting is `last-wins`
+  (default; a later write takes the key over) or `displace` (the named claim
+  moves to the next free pool key).
+- **`blincli clear` only blanks a key you still own** (owner tag match); if
+  another session took the slot over, it stays lit. `clear --force` overrides.
+- **iTerm2 limitation:** `$ITERM_SESSION_ID` is fixed when the shell starts,
+  so after reordering or closing tabs the tab number is stale.
+- Debug with `blincli detect` (shows the recognized terminal, tab and key)
+  and `-v` on any command.
+
 ## `hooks-wezterm-pane.json`
 
+A raw-`curl` example, kept for reference; `hooks-blincli.json` supersedes it.
 An alternative to `hooks-basic.json`, not an addition to it: instead of
 claiming a pooled key by `$CLAUDE_CODE_SESSION_ID`, each event writes
 directly (`R,C` addressing, no claim pool involved) to a row-0 key whose
