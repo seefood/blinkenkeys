@@ -1,6 +1,10 @@
 package api
 
 import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"log/slog"
 	"net/http"
 	"testing"
 
@@ -26,6 +30,37 @@ func TestPutDisplacedClaimIsReappliedOnItsNewKey(t *testing.T) {
 	}
 	if w.origins[1] != (effects.Origin{Type: "color", Ref: "red", Owner: "s1"}) {
 		t.Errorf("carried origin = %+v", w.origins[1])
+	}
+}
+
+// F12 ruling: a failed carry replay is logged at Warn with the displaced
+// claim's name, owner and both keys; no API change.
+func TestPutFailedCarryReplayLogsWarnWithKeyAndOwner(t *testing.T) {
+	disp := knownPad()
+	disp.moved = &dispatcher.Moved{Name: "x", From: 3, To: 4}
+	from := effects.Target{Device: "uid-01", Addr: keyaddr.Address{Kind: keyaddr.LED, N: 3}}
+	w := &fakeWriter{err: errors.New("queue full"), status: map[effects.Target]effects.Status{
+		from: {Origin: effects.Origin{Type: "color", Ref: "red", Owner: "s1"}},
+	}}
+	var buf bytes.Buffer
+	h := NewHandler(disp, w, &fakeLibrary{}, slog.New(slog.NewJSONHandler(&buf, nil)))
+	put(t, h, "/devices/0/keys/led:3", `{"color":"blue"}`)
+	var found bool
+	for _, line := range bytes.Split(bytes.TrimSpace(buf.Bytes()), []byte("\n")) {
+		var rec map[string]any
+		if err := json.Unmarshal(line, &rec); err != nil {
+			t.Fatalf("log line %q: %v", line, err)
+		}
+		if rec["msg"] != "displace: re-apply failed" {
+			continue
+		}
+		found = true
+		if rec["level"] != "WARN" || rec["name"] != "x" || rec["owner"] != "s1" || rec["from"] != "led:3" || rec["to"] != "led:4" || rec["err"] != "queue full" {
+			t.Errorf("log record = %v, want WARN with name x, owner s1, from led:3, to led:4, err", rec)
+		}
+	}
+	if !found {
+		t.Errorf("no re-apply failure logged; log: %s", buf.String())
 	}
 }
 

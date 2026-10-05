@@ -134,11 +134,12 @@ func (h *Handler) writeKey(w http.ResponseWriter, r *http.Request) {
 	// a concurrent write to the key in between can be replayed stale. Best
 	// effort by design.
 	var carry func(effects.Target, time.Time) error
+	var carryOwner string
 	if moved != nil && !moved.Dropped {
 		if st, ok := h.w.Status(target, now); ok {
 			if b, ok := bodyOf(st.Origin); ok {
 				if c, err := h.prepare(b); err == nil {
-					carry = c
+					carry, carryOwner = c, st.Origin.Owner
 				}
 			}
 		}
@@ -149,9 +150,10 @@ func (h *Handler) writeKey(w http.ResponseWriter, r *http.Request) {
 	if carry != nil {
 		to := effects.Target{Device: device, Addr: keyaddr.Address{Kind: keyaddr.LED, N: moved.To}}
 		// Best effort: a failure to restore the displaced key must not fail
-		// the incoming write.
+		// the incoming write; it is surfaced only in this log.
 		if err := carry(to, now); err != nil && h.logger != nil {
-			h.logger.Warn("displace: re-apply failed", "device", device, "name", moved.Name, "err", err)
+			h.logger.Warn("displace: re-apply failed", "device", device, "name", moved.Name, "owner", carryOwner,
+				"from", target.Addr.String(), "to", to.Addr.String(), "err", err)
 		}
 	}
 	if writeErr != nil {
