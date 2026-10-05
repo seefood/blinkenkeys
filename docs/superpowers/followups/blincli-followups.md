@@ -69,42 +69,11 @@ Priority: **P1** behavior/security gap, **P2** correctness edge, **P3** polish/t
 - Fix: reject a non-empty path (other than `/`) or query in `Endpoint` resolution with usage error 64, or join with `url.JoinPath`.
 - Test: both forms.
 
-### F8. Conditional `clear` after a daemon restart
-- Where: `internal/api/handlers.go` (~L212-216). Status records are in-memory, so after a restart a stale session's `clear?owner=` finds no record and blanks the key now owned by another session.
-- Options: persist nothing and document (current), or have the daemon refuse conditional clears with no record (409/no-op). Needs a spec decision first; write the decision into the spec, then implement test-first.
-
-### F9. Non-atomic check-then-clear
-- Where: `internal/api/handlers.go` conditional DELETE (Status, then SetColor). A racing owner write inside that window is blanked.
-- Fix: add `effects.Engine.ClearIfOwner(key, owner)` doing the check and blank under the engine lock; use it from the handler.
-- Test: concurrent PUT-by-other-owner / DELETE-by-first-owner under `-race`.
-
-### F10. `GET /devices/{name}` layout exposes `tabs` only
-- Where: `internal/api/keyview.go:16-21`. Spec says `layout: {tabs, pool}`.
-- Fix: add `pool` (and `collision`), update the client `Capabilities.Layout`, CHANGELOG and README wording.
-- Test: configured pool/collision round-trips; omitted vs `pool: []` stay distinguishable.
-
-### F11. `GET /keys` lists only keys with status records
-- Where: `internal/api/keyview.go:132` (`listKeys`). A claimed or direct-owned key without a record (e.g. after an internal blank) is missing; the spec says "every registered key".
-- Fix: enumerate the registry, join with status records.
-- Test: claim a key, blank it internally, assert it is still listed.
-
-### F12. Failed displaced-claim carry replay is only logged
-- Where: `internal/dispatcher/place.go` and `internal/api/handlers.go` replay. Best-effort race between `Place` and the replay is documented but the user sees nothing.
-- Fix: surface the failure (log level, response header, or status record flag); decide with spec owner.
+### F10. Client does not decode `layout.pool` / `layout.collision`
+- Daemon side done (capabilities `layout` now has `pool`, omitted for the default pool, `[]` when empty, and `collision`). Remaining: client `Capabilities.Layout` in `internal/client` still decodes only `tabs`.
 
 ## P3 (tests, polish, docs)
 
-- **T1** `KeyList` null YAML (`pool: ~`) behavior: decide (no pool vs default pool), document, test. `config/keylist.go`.
-- **T2** Parse errors double-prefix `config:` when wrapped by `Load`. Fix prefixing in one place.
-- **T3** `TestKeyListOmittedStaysNil` passes vacuously if unmarshal errors: assert `err == nil` first.
-- **T4** `SetLayout`/`Layout` share `Tabs`/`Pool` slices without copying: copy on set and on read.
-- **T5** Add test: `SetCaps` resolving pending named writes under a layout.
-- **T6** Add test: `Lookup` leaves the claim's idle clock unchanged; test unknown device and `KeyInfo` on a named claim.
-- **T7** `Lookup` on a non-name address may trigger capabilities HID I/O (`opGetCapabilities`). Document or guard.
-- **T8** `HSV.Hex` tests cover only S=0/V=0/H=0: add hue regions 1–5 as a table test.
-- **T9** A dropped Tick on write failure reads as a normal finish in effect status records: add a failure marker; test that a failed write leaves the old record intact.
-- **T10** Key view reads (`getKey`, `buildView`) are non-atomic and `getKey` calls `KeyInfo` twice (`keyview.go:116`): single read.
-- **T11** `Place` has no live-dispatcher test (fakes only): add one against the real dispatcher with a fake HID backend.
 - **T12** `termid`: the second tmux call runs after the first failed; the real-exec test relies on `sleep` being on PATH. Short-circuit, and make the test self-contained.
 - **T13** Token-file read error: wrap with `%w` so the cause is inspectable (check the final text still has no token).
 - **T14** `detect` ignores `-v`/`-q`; `detect -h` prints the global usage; `vlog` uses a non-constant format string.
