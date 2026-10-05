@@ -17,7 +17,7 @@ func TestPlanKeyOrder(t *testing.T) {
 		want Plan
 	}{
 		{"explicit key wins", KeyInput{Key: "0,1", Name: "n", ID: iterm}, Plan{Mode: ModeExplicit, Key: "0,1"}},
-		{"explicit name", KeyInput{Name: "build", ID: iterm}, Plan{Mode: ModeNamed, Base: "build", Name: "build", Owner: "build"}},
+		{"explicit name", KeyInput{Name: "build", ID: iterm}, Plan{Mode: ModeNamed, Base: "build", Name: "build", Owner: "build", Given: true}},
 		{"tab slot", KeyInput{ID: iterm, Fallback: "claude-x"}, Plan{Mode: ModeSlot, Tab: 3, Base: "iterm-ab12cd34", Owner: "iterm-ab12cd34"}},
 		{"instance id when no tab", KeyInput{ID: wez, Fallback: "claude-x"}, Plan{Mode: ModeNamed, Base: "wezterm-17", Name: "wezterm-17", Owner: "wezterm-17"}},
 		{"env fallback", KeyInput{Fallback: "claude-x"}, Plan{Mode: ModeNamed, Base: "claude-x", Name: "claude-x", Owner: "claude-x"}},
@@ -53,6 +53,12 @@ func TestQualifyPrefixesHost(t *testing.T) {
 	s, _ := PlanKey(KeyInput{ID: termid.Identity{Terminal: "iterm", Tab: 1, InstanceID: "ab"}})
 	if sq := s.Qualify("laptop"); sq.Owner != "laptop.iterm-ab" || sq.Name != "" {
 		t.Errorf("slot: %+v", sq)
+	}
+	if n, _ := PlanKey(KeyInput{Name: "foo"}); n.Qualify("laptop").Name != "foo" || n.Qualify("laptop").Owner != "foo" {
+		t.Errorf("explicit -n must stay verbatim: %+v", n.Qualify("laptop"))
+	}
+	if fb, _ := PlanKey(KeyInput{Fallback: "claude-x"}); fb.Qualify("laptop").Name != "laptop.claude-x" {
+		t.Errorf("derived fallback must be qualified: %+v", fb.Qualify("laptop"))
 	}
 	e, _ := PlanKey(KeyInput{Key: "0,0"})
 	if e.Qualify("laptop") != e || p.Qualify("") != p {

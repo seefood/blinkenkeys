@@ -41,6 +41,7 @@ type Plan struct {
 	Base  string
 	Name  string
 	Owner string
+	Given bool // Name came from -n verbatim (never host-qualified)
 }
 
 // PlanKey picks the key strategy: -k, then -n, then the terminal's tab slot,
@@ -59,7 +60,7 @@ func PlanKey(in KeyInput) (Plan, error) {
 		if a, err := keyaddr.Parse(in.Name); err != nil || a.Kind != keyaddr.Name || in.Name == "." || in.Name == ".." {
 			return Plan{}, fmt.Errorf("%w: %q is not a usable key name (no led:/idx: prefix, not . or ..); use -k for a direct address", ErrUsage, in.Name)
 		}
-		return Plan{Mode: ModeNamed, Base: in.Name, Name: in.Name, Owner: in.Name}, nil
+		return Plan{Mode: ModeNamed, Base: in.Name, Name: in.Name, Owner: in.Name, Given: true}, nil
 	case in.ID.Tab > 0:
 		n := in.ID.Name()
 		return Plan{Mode: ModeSlot, Tab: in.ID.Tab, Base: n, Owner: n}, nil
@@ -74,9 +75,10 @@ func PlanKey(in KeyInput) (Plan, error) {
 }
 
 // Qualify prefixes a derived identity with host so panes on different
-// machines sharing one daemon don't collide. Explicit plans are unchanged.
+// machines sharing one daemon don't collide. Explicit -k plans and -n names
+// are unchanged, so hosts can share a name on purpose.
 func (p Plan) Qualify(host string) Plan {
-	if host == "" || p.Base == "" || p.Mode == ModeExplicit {
+	if host == "" || p.Base == "" || p.Mode == ModeExplicit || p.Given {
 		return p
 	}
 	q := host + "." + p.Base

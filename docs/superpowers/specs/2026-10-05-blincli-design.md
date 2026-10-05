@@ -104,8 +104,10 @@ Order, first match wins:
    pid heuristics). `--if-detected` turns this into a silent exit 0.
 
 Remote transport: derived names/owners are prefixed with the short hostname
-(`laptop.wezterm-17`) so panes on different machines do not collide. Names must not contain
-`,` (it parses as `R,C`) or `/` (single path segment).
+(`laptop.wezterm-17`) so panes on different machines do not collide. An explicit `-n NAME` is
+used verbatim (never prefixed) by `set`, `clear` and `get` alike, so hosts can share a name on
+purpose. Names must not contain `,` (it parses as `R,C`) or `/` (single path segment), must not
+start with `led:`/`idx:` (direct addresses), and must not be `.` or `..`.
 
 ### Terminal resolvers (implement as many as feasible)
 
