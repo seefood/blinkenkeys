@@ -1,6 +1,9 @@
 package main
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -170,6 +173,66 @@ func TestGetExplicitKeyAndSlotsOverride(t *testing.T) {
 	last := f.calls[len(f.calls)-1]
 	if last.Path != "/devices/d/keys/idx:0" {
 		t.Errorf("last call %v", last)
+	}
+}
+
+// -m N means slots idx:0..N-1 (ignoring the daemon's layout.tabs), and set
+// and get must agree on it, whether N comes from -m or from blincli.yaml.
+func TestSlotsOverrideIsIdxZeroToNMinusOneForSetAndGet(t *testing.T) {
+	cfg := filepath.Join(t.TempDir(), "blincli.yaml")
+	if err := os.WriteFile(cfg, []byte("slots: 3\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tab := range []int{1, 2, 3, 4, 7} {
+		for _, src := range [][]string{{"-m", "3"}, {"--slots", "3"}, {"-C", cfg}} {
+			env := func() map[string]string {
+				return map[string]string{"ITERM_SESSION_ID": fmt.Sprintf("w0t%dp0:X", tab-1)}
+			}
+			want := fmt.Sprintf("/devices/d/keys/idx:%d", (tab-1)%3)
+
+			sf := &setFakeDaemon{tabs: []uint16{7, 8, 9, 10}}
+			sa, errs := setDaemonApp(t, sf, env())
+			if code := sa.run(append([]string{"set", "-c", "red"}, src...)); code != 0 {
+				t.Fatalf("set: code %d: %s", code, errs)
+			}
+			if w := sf.writes(); len(w) != 1 || w[0].Path != want {
+				t.Errorf("tab %d %v: set wrote %+v, want %s", tab, src, w, want)
+			}
+
+			gf := &getFake{tabs: "[7,8,9,10]"}
+			ga := getApp(t, gf, env())
+			gerr := &strings.Builder{}
+			ga.stderr = gerr
+			ga.run(append([]string{"get"}, src...))
+			if len(gf.calls) == 0 {
+				t.Fatalf("tab %d %v: get sent nothing; stderr %s", tab, src, gerr)
+			}
+			if last := gf.calls[len(gf.calls)-1]; last.Path != want {
+				t.Errorf("tab %d %v: get read %s, want %s", tab, src, last.Path, want)
+			}
+		}
+	}
+}
+
+// An explicit key needs no terminal detection, so no helper may run.
+func TestExplicitKeySkipsTerminalDetection(t *testing.T) {
+	for _, cmd := range [][]string{{"set", "-k", "idx:0", "-c", "red"}, {"clear", "-k", "idx:0"}, {"get", "-k", "idx:0"}} {
+		sf := &setFakeDaemon{}
+		a, _ := setDaemonApp(t, sf, map[string]string{"TMUX_PANE": "%3"})
+		ran := false
+		a.termEnv.Run = func(context.Context, string, ...string) (string, error) { ran = true; return "", errors.New("no") }
+		a.run(cmd)
+		if ran {
+			t.Errorf("%v ran a terminal helper", cmd)
+		}
+	}
+	sf := &setFakeDaemon{}
+	a, _ := setDaemonApp(t, sf, map[string]string{"TMUX_PANE": "%3", "BLINKENKEYS_KEY": "idx:2"})
+	ran := false
+	a.termEnv.Run = func(context.Context, string, ...string) (string, error) { ran = true; return "", errors.New("no") }
+	a.run([]string{"set", "-c", "red"})
+	if ran {
+		t.Error("$BLINKENKEYS_KEY ran a terminal helper")
 	}
 }
 

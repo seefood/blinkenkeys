@@ -53,7 +53,7 @@ type prepared struct {
 	cl     *client.Client
 	device string
 	plan   client.Plan
-	slots  int // 0: ask the daemon
+	slots  int // <= 0: ask the daemon
 	g      *globals
 }
 
@@ -80,10 +80,7 @@ func (a *app) prepare(ctx context.Context, g *globals, k keyFlags) (p prepared, 
 	}
 	slots := k.slots
 	if slots <= 0 {
-		slots = fc.Slots
-	}
-	if slots < 0 {
-		slots = 0
+		slots = fc.Slots // tabs() treats <= 0 as "ask the daemon"
 	}
 	a.vlog(g, "device %s, key mode %d, owner %q", device, plan.Mode, plan.Owner)
 	return prepared{cl: cl, device: device, plan: plan, slots: slots, g: g}, false, nil

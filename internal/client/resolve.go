@@ -16,6 +16,7 @@ import (
 // Sentinels the command layer maps to exit codes.
 var (
 	ErrNoEndpoint  = errors.New("no blinkenkeysd endpoint configured") // exit 78
+	ErrBadConfig   = errors.New("invalid blincli config")              // exit 78
 	ErrUnreachable = errors.New("blinkenkeysd unreachable")            // exit 69
 	ErrAuth        = errors.New("bearer token missing or rejected")    // exit 77
 	ErrUsage       = errors.New("usage error")                         // exit 64
@@ -91,6 +92,7 @@ or pass --url/--socket on each call, or set BLINKENKEYS_URL / BLINKENKEYS_SOCKET
 type Resolver struct {
 	Getenv func(string) string
 	Home   string
+	Warn   func(string) // optional; receives PermWarning for the loaded config
 }
 
 // ConfigPath is the client config path in effect.
@@ -107,6 +109,9 @@ func (r Resolver) Resolve(o Options) (Endpoint, FileConfig, error) {
 	fc, exists, err := LoadFile(path)
 	if err != nil {
 		return Endpoint{}, fc, err
+	}
+	if w := PermWarning(path, fc); w != "" && r.Warn != nil {
+		r.Warn(w)
 	}
 	layers := []struct{ url, socket, src string }{
 		{o.URL, o.Socket, "command line"},
@@ -131,6 +136,11 @@ func (r Resolver) httpEndpoint(raw, src string, o Options, fc FileConfig) (Endpo
 	u, err := url.Parse(raw)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		return Endpoint{}, fmt.Errorf("%w: %q is not an http(s) URL", ErrUsage, redactURL(raw))
+	}
+	// API paths are appended to the URL as text; a path prefix works, a
+	// query or fragment would end up in front of them.
+	if strings.ContainsAny(raw, "?#") {
+		return Endpoint{}, fmt.Errorf("%w: %q: the daemon URL must not have a query or fragment", ErrUsage, redactURL(raw))
 	}
 	tok, err := r.token(o, fc)
 	if err != nil {

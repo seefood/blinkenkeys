@@ -208,6 +208,39 @@ func TestClearNamedFallsBackToSharedKeyAndTreats404AsDone(t *testing.T) {
 	}
 }
 
+func TestExplicitNameThatIsAnAddressOrDotSegmentIsUsageError(t *testing.T) {
+	for _, n := range []string{"led:3", "idx:2", ".", ".."} {
+		for _, cmd := range [][]string{{"set", "-c", "red"}, {"clear"}, {"get"}} {
+			f := &setFakeDaemon{}
+			a, errs := setDaemonApp(t, f, nil)
+			if code := a.run(append(cmd, "-n", n)); code != exitUsage || len(f.calls) != 0 {
+				t.Errorf("%v -n %q: code %d, calls %+v, stderr %q", cmd, n, code, f.calls, errs)
+			}
+		}
+	}
+}
+
+func TestExplicitNameIsNotHostQualifiedOnRemote(t *testing.T) {
+	f := &setFakeDaemon{}
+	a, errs := setDaemonApp(t, f, setItermEnv())
+	for _, args := range [][]string{{"set", "-n", "foo", "-c", "red"}, {"clear", "-n", "foo"}, {"get", "-n", "foo"}} {
+		a.run(args)
+	}
+	var paths []string
+	for _, c := range f.calls {
+		if c.Path != "/devices" {
+			paths = append(paths, c.Method+" "+c.Path+"?"+c.Query)
+		}
+	}
+	want := []string{"PUT /devices/d/keys/foo?", "DELETE /devices/d/keys/foo?", "GET /devices/d/keys/foo?"}
+	if strings.Join(paths, "|") != strings.Join(want, "|") {
+		t.Errorf("requests = %q, want %q (stderr %s)", paths, want, errs)
+	}
+	if w := f.writes(); len(w) == 0 || !strings.Contains(w[0].Body, `"owner":"foo"`) {
+		t.Errorf("set owner must be the verbatim name: %+v", w)
+	}
+}
+
 func TestClearIfDetectedWithNoKey(t *testing.T) {
 	f := &setFakeDaemon{}
 	a, _ := setDaemonApp(t, f, nil)

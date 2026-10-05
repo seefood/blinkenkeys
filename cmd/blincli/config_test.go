@@ -1,6 +1,9 @@
 package main
 
 import (
+	"errors"
+	iofs "io/fs"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -173,6 +176,60 @@ func TestConfigInitForceReplacesSymlinkNotTarget(t *testing.T) {
 	}
 }
 
+func noTempLeft(t *testing.T, dir string) {
+	t.Helper()
+	if m, _ := filepath.Glob(filepath.Join(dir, ".blincli-*.tmp")); len(m) != 0 {
+		t.Errorf("temp files left behind: %v", m)
+	}
+}
+
+func TestConfigInitForceOnDirectoryFailsCleanly(t *testing.T) {
+	a, path, _, errs := cfgApp(t, nil)
+	if err := os.MkdirAll(filepath.Join(path, "inner"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	code := a.run([]string{"config", "init", "-C", path, "--force", "--token", "t"})
+	if code == 0 || code == 2 || errs.Len() == 0 {
+		t.Errorf("--force onto a directory: code %d, stderr %q", code, errs)
+	}
+	if fi, err := os.Stat(filepath.Join(path, "inner")); err != nil || !fi.IsDir() {
+		t.Errorf("directory target damaged: %v %v", fi, err)
+	}
+	noTempLeft(t, filepath.Dir(path))
+}
+
+// Without --force, writeConfig itself must refuse an existing target (the
+// Lstat check in configInit is only the friendly message; a file created
+// after it must still not be clobbered).
+func TestWriteConfigNoClobber(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "blincli.yaml")
+	if err := os.WriteFile(path, []byte("mine\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeConfig(path, "new\n", false); !errors.Is(err, iofs.ErrExist) {
+		t.Errorf("err = %v, want ErrExist", err)
+	}
+	if b, _ := os.ReadFile(path); string(b) != "mine\n" {
+		t.Errorf("existing file clobbered: %q", b)
+	}
+	noTempLeft(t, dir)
+	fresh := filepath.Join(dir, "fresh.yaml")
+	if err := writeConfig(fresh, "new\n", false); err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Stat(fresh); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Errorf("fresh file: %v %v", fi, err)
+	}
+	if err := writeConfig(path, "new\n", true); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(path); string(b) != "new\n" {
+		t.Errorf("force did not replace: %q", b)
+	}
+	noTempLeft(t, dir)
+}
+
 func TestConfigInitDanglingSymlinkNeedsForce(t *testing.T) {
 	a, path, _, _ := cfgApp(t, nil)
 	_ = os.MkdirAll(filepath.Dir(path), 0o700)
@@ -250,5 +307,71 @@ func TestConfigPath(t *testing.T) {
 	a.run([]string{"config", "path", "-C", path})
 	if strings.TrimSpace(out.String()) != path {
 		t.Errorf("path = %q", out)
+	}
+}
+
+func TestOpenConfigWithTokenWarns(t *testing.T) {
+	f := &setFakeDaemon{}
+	srv := httptest.NewServer(f)
+	defer srv.Close()
+	for _, tc := range []struct {
+		mode os.FileMode
+		warn bool
+	}{{0o644, true}, {0o600, false}} {
+		a, path, out, errs := cfgApp(t, nil)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("url: "+srv.URL+"\ntoken: SECRETTOKEN123\ndevice: d\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(path, tc.mode); err != nil {
+			t.Fatal(err)
+		}
+		code := a.run([]string{"-C", path, "set", "-k", "idx:0", "-c", "red"})
+		if code != 0 {
+			t.Errorf("%o: code %d (a warning must not change the exit code): %s", tc.mode, code, errs)
+		}
+		all := out.String() + errs.String()
+		if strings.Contains(all, "SECRETTOKEN123") {
+			t.Errorf("%o: leaked the token: %s", tc.mode, all)
+		}
+		if got := strings.Contains(errs.String(), "readable"); got != tc.warn {
+			t.Errorf("%o: warned=%v, want %v; stderr %q", tc.mode, got, tc.warn, errs)
+		}
+		if tc.warn && strings.Count(errs.String(), "\n") != 1 {
+			t.Errorf("warning must be one line: %q", errs)
+		}
+		errs.Reset()
+		if code := a.run([]string{"config", "show", "-C", path}); code != 0 || strings.Contains(errs.String(), "readable") != tc.warn {
+			t.Errorf("%o: config show code %d, stderr %q", tc.mode, code, errs)
+		}
+	}
+}
+
+func TestMalformedConfigExits78WithoutContent(t *testing.T) {
+	for _, body := range []string{
+		"token: SECRETTOKEN123\nurll: x\n",
+		"url: http://h:1\ntoken: SECRETTOKEN123\nslots: x\n",
+		"token: SECRETTOKEN123\nurl: [unterminated\n",
+	} {
+		for _, args := range [][]string{{"config", "show"}, {"set", "-k", "idx:0", "-c", "red"}, {"get", "-k", "idx:0"}, {"clear", "-k", "idx:0"}, {"devices"}} {
+			a, path, out, errs := cfgApp(t, map[string]string{"BLINKENKEYS_SOCKET": "/nonexistent/api.sock"})
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if code := a.run(append([]string{"-C", path}, args...)); code != exitConfig {
+				t.Errorf("%v on %q: code %d, want 78; stderr %s", args, body, code, errs)
+			}
+			all := out.String() + errs.String()
+			for _, frag := range []string{"SECRETTOKEN123", "unterminated", "urll: x", "slots: x"} {
+				if strings.Contains(all, frag) {
+					t.Errorf("%v: output quotes file content %q:\n%s", args, frag, all)
+				}
+			}
+		}
 	}
 }

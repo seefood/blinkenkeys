@@ -69,7 +69,15 @@ var commands = map[string]func(*app, []string) int{
 	"detect":  (*app).cmdDetect,
 }
 
-func (a *app) run(args []string) int {
+// run executes one invocation. A panic becomes exit 1 rather than the Go
+// runtime's exit 2, which Claude Code hooks would treat as blocking.
+func (a *app) run(args []string) (code int) {
+	defer func() {
+		if r := recover(); r != nil {
+			_, _ = fmt.Fprintf(a.stderr, "blincli: internal error: %v\n", r)
+			code = exitFail
+		}
+	}()
 	fs, g := a.newFlags("blincli")
 	if code, done := a.parse(fs, args); done {
 		return code
@@ -100,7 +108,7 @@ func exitCode(err error) int {
 	switch {
 	case err == nil:
 		return exitOK
-	case errors.Is(err, client.ErrNoEndpoint):
+	case errors.Is(err, client.ErrNoEndpoint), errors.Is(err, client.ErrBadConfig):
 		return exitConfig
 	case errors.Is(err, client.ErrUnreachable):
 		return exitUnavailable
@@ -126,13 +134,18 @@ func (a *app) fail(err error) int {
 
 func (a *app) vlog(g *globals, format string, args ...any) {
 	if g.Verbose {
-		_, _ = fmt.Fprintf(a.stderr, "blincli: "+format+"\n", args...)
+		_, _ = fmt.Fprintf(a.stderr, "blincli: %s\n", fmt.Sprintf(format, args...))
 	}
+}
+
+// resolver is the endpoint resolver; config-permission warnings go to stderr.
+func (a *app) resolver() client.Resolver {
+	return client.Resolver{Getenv: a.getenv, Home: a.home, Warn: func(w string) { _, _ = fmt.Fprintln(a.stderr, w) }}
 }
 
 // session resolves the endpoint and builds a client.
 func (a *app) session(g *globals) (*client.Client, client.Endpoint, client.FileConfig, error) {
-	r := client.Resolver{Getenv: a.getenv, Home: a.home}
+	r := a.resolver()
 	ep, fc, err := r.Resolve(client.Options{Socket: g.Socket, URL: g.URL, Token: g.Token, TokenFile: g.TokenFile, ConfigPath: g.Config})
 	if err != nil {
 		return nil, ep, fc, err
@@ -174,6 +187,10 @@ func (a *app) planKey(ctx context.Context, key, name string) (client.Plan, termi
 	if key == "" {
 		key = a.getenv("BLINKENKEYS_KEY")
 	}
+	if key != "" { // an explicit key needs no terminal helpers
+		plan, err := client.PlanKey(client.KeyInput{Key: key})
+		return plan, termid.Identity{}, err
+	}
 	id := termid.Detect(ctx, a.termEnv)
 	fallback, _ := termid.FallbackName(a.getenv)
 	plan, err := client.PlanKey(client.KeyInput{Key: key, Name: name, ID: id, Fallback: fallback})
@@ -187,35 +204,47 @@ func (a *app) cmdDetect(args []string) int {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
 	defer cancel()
+	w := a.stdout
+	if g.Quiet {
+		w = io.Discard
+	}
 	plan, id, perr := a.planKey(ctx, "", "")
+	if perr == nil && plan.Mode == client.ModeExplicit { // planKey skipped detection
+		id = termid.Detect(ctx, a.termEnv)
+	}
+	if _, src := termid.FallbackName(a.getenv); src != "" {
+		a.vlog(g, "fallback name source $%s (used only without a terminal instance id)", src)
+	}
 	if id.Terminal == "" {
-		_, _ = fmt.Fprintln(a.stdout, "terminal   none recognized")
+		_, _ = fmt.Fprintln(w, "terminal   none recognized")
 	} else {
 		tab := "unknown"
 		if id.Tab > 0 {
 			tab = fmt.Sprint(id.Tab)
 		}
-		_, _ = fmt.Fprintf(a.stdout, "terminal   %s (instance %q, tab %s)\n", id.Terminal, id.InstanceID, tab)
+		_, _ = fmt.Fprintf(w, "terminal   %s (instance %q, tab %s)\n", id.Terminal, id.InstanceID, tab)
 	}
 	switch {
 	case perr != nil:
-		_, _ = fmt.Fprintf(a.stdout, "key        none (%v)\n", perr)
+		_, _ = fmt.Fprintf(w, "key        none (%v)\n", perr)
+	case plan.Mode == client.ModeExplicit:
+		_, _ = fmt.Fprintf(w, "key        %s (from $BLINKENKEYS_KEY)\n", plan.Key)
 	case plan.Mode == client.ModeSlot:
-		_, _ = fmt.Fprintf(a.stdout, "key        tab %d -> a tab slot (owner %s)\n", plan.Tab, plan.Owner)
+		_, _ = fmt.Fprintf(w, "key        tab %d -> a tab slot (owner %s)\n", plan.Tab, plan.Owner)
 	default:
-		_, _ = fmt.Fprintf(a.stdout, "key        name %s (claimed from the pool; shared slot if it is full)\n", plan.Name)
+		_, _ = fmt.Fprintf(w, "key        name %s (claimed from the pool; shared slot if it is full)\n", plan.Name)
 	}
-	r := client.Resolver{Getenv: a.getenv, Home: a.home}
+	r := a.resolver()
 	ep, _, err := r.Resolve(client.Options{Socket: g.Socket, URL: g.URL, Token: g.Token, TokenFile: g.TokenFile, ConfigPath: g.Config})
 	if err != nil {
-		_, _ = fmt.Fprintf(a.stdout, "transport  none (%v)\n", firstLine(err.Error()))
+		_, _ = fmt.Fprintf(w, "transport  none (%v)\n", firstLine(err.Error()))
 		return exitOK
 	}
 	where := ep.Socket
 	if ep.Remote() {
 		where = client.RedactURL(ep.BaseURL)
 	}
-	_, _ = fmt.Fprintf(a.stdout, "transport  %s %s  (%s)\n", ep.Kind, where, ep.Source)
+	_, _ = fmt.Fprintf(w, "transport  %s %s  (%s)\n", ep.Kind, where, ep.Source)
 	return exitOK
 }
 

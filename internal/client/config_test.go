@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -76,6 +77,41 @@ func TestLoadFileErrorsDoNotLeakSource(t *testing.T) {
 		if !strings.Contains(err.Error(), p) {
 			t.Errorf("%s: error should name the file: %v", name, err)
 		}
+	}
+}
+
+func TestPermWarning(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("no Unix modes")
+	}
+	dir := t.TempDir()
+	write := func(name, body string, mode os.FileMode) (string, FileConfig) {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(p, mode); err != nil {
+			t.Fatal(err)
+		}
+		fc, _, err := LoadFile(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return p, fc
+	}
+	p, fc := write("open.yaml", "token: SECRETTOKEN123\n", 0o644)
+	w := PermWarning(p, fc)
+	if w == "" || !strings.Contains(w, p) || strings.Contains(w, "SECRETTOKEN123") {
+		t.Errorf("0644 with token: warning %q", w)
+	}
+	if p, fc := write("group.yaml", "token: SECRETTOKEN123\n", 0o640); PermWarning(p, fc) == "" {
+		t.Error("0640 with token must warn")
+	}
+	if p, fc := write("tight.yaml", "token: SECRETTOKEN123\n", 0o600); PermWarning(p, fc) != "" {
+		t.Error("0600 must be silent")
+	}
+	if p, fc := write("notoken.yaml", "token_file: ~/t\n", 0o644); PermWarning(p, fc) != "" {
+		t.Error("no inline token: silent")
 	}
 }
 

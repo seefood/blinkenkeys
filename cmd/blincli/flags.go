@@ -55,13 +55,80 @@ func (a *app) parse(fs *flag.FlagSet, args []string) (code int, done bool) {
 	case err == nil:
 		return 0, false
 	case errors.Is(err, flag.ErrHelp):
-		a.printUsage(a.stdout)
+		if _, ok := cmdSynopsis[fs.Name()]; ok {
+			printCmdUsage(a.stdout, fs)
+		} else {
+			a.printUsage(a.stdout)
+		}
 		return exitOK, true
 	default:
 		_, _ = fmt.Fprintf(a.stderr, "blincli: %v\n", err)
 		_, _ = fmt.Fprintln(a.stderr, "try 'blincli --help'")
 		return exitUsage, true
 	}
+}
+
+// cmdSynopsis is each command's usage line and one-line description, keyed
+// by FlagSet name; a command listed here gets its own -h output.
+var cmdSynopsis = map[string][2]string{
+	"set":         {"[options] (-c COLOR | -e EFFECT | -s STATE)", "write a color / effect / template state to a key"},
+	"clear":       {"[options]", "blank a key and release it"},
+	"get":         {"[options]", "show a key's registration and current state"},
+	"devices":     {"[options] [DEVICE]", "list devices, or show one device's layout"},
+	"detect":      {"[options]", "show what blincli would use (terminal, key, endpoint); sends nothing"},
+	"config init": {"[options]", "write blincli.yaml from the global options, or a template"},
+	"config show": {"[options]", "print the client config with secrets masked"},
+	"config path": {"[options]", "print the client config path in effect"},
+}
+
+// globalFlagNames are left out of per-command help (blincli --help lists them).
+var globalFlagNames = map[string]bool{
+	"socket": true, "S": true, "url": true, "u": true, "token": true, "t": true, "token-file": true,
+	"device": true, "d": true, "config": true, "C": true, "verbose": true, "v": true, "quiet": true, "q": true,
+}
+
+// printCmdUsage prints fs's command-specific options. A long and a short
+// flag registered with the same usage text are one option ("-c, --color").
+func printCmdUsage(w io.Writer, fs *flag.FlagSet) {
+	syn := cmdSynopsis[fs.Name()]
+	_, _ = fmt.Fprintf(w, "Usage: blincli %s %s\n\n%s\n", fs.Name(), syn[0], syn[1])
+	type opt struct{ short, long, arg, usage string }
+	var opts []*opt
+	byUsage := map[string]*opt{}
+	fs.VisitAll(func(f *flag.Flag) {
+		if globalFlagNames[f.Name] {
+			return
+		}
+		o := byUsage[f.Usage]
+		if o == nil {
+			arg, usage := flag.UnquoteUsage(f)
+			o = &opt{arg: arg, usage: usage}
+			byUsage[f.Usage] = o
+			opts = append(opts, o)
+		}
+		if len(f.Name) == 1 {
+			o.short = "-" + f.Name
+		} else {
+			o.long = "--" + f.Name
+		}
+	})
+	if len(opts) > 0 {
+		_, _ = fmt.Fprintln(w, "\nOptions:")
+	}
+	for _, o := range opts {
+		names := "    " + o.long
+		switch {
+		case o.long == "":
+			names = o.short
+		case o.short != "":
+			names = o.short + ", " + o.long
+		}
+		if o.arg != "" {
+			names += " " + o.arg
+		}
+		_, _ = fmt.Fprintf(w, "  %-24s %s\n", names, o.usage)
+	}
+	_, _ = fmt.Fprintln(w, "\nGlobal options and exit codes: see 'blincli --help'.")
 }
 
 func (a *app) printUsage(w io.Writer) {
@@ -86,8 +153,10 @@ Global options (accepted before or after the command):
   -v, --verbose          print resolved endpoint/device/key to stderr
   -q, --quiet            suppress non-error output
   -h, --help
+A value given after the command overrides one given before it; to switch
+off -v/-q given before the command, use -v=false / -q=false after it.
 
 Exit codes: 0 ok, 1 daemon error, 64 usage, 66 key not registered,
-69 daemon unreachable, 77 auth, 78 no config/endpoint.
+69 daemon unreachable, 77 auth, 78 no endpoint or invalid config.
 `)
 }

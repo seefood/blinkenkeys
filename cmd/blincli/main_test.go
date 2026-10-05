@@ -41,6 +41,7 @@ func TestExitCodeMapping(t *testing.T) {
 		{nil, 0},
 		{fmt.Errorf("x: %w", client.ErrNoEndpoint), 78},
 		{&client.NoEndpointError{}, 78},
+		{fmt.Errorf("x: %w", client.ErrBadConfig), 78},
 		{fmt.Errorf("x: %w", client.ErrUnreachable), 69},
 		{fmt.Errorf("x: %w", client.ErrAuth), 77},
 		{&client.APIError{Status: 401}, 77},
@@ -63,6 +64,18 @@ func TestNeverExitsTwo(t *testing.T) {
 		if code := a.run(args); code == 2 {
 			t.Errorf("%v exited 2 (Claude Code hooks treat 2 as blocking)", args)
 		}
+	}
+}
+
+func TestPanicExitsOneNotTwo(t *testing.T) {
+	commands["test-panic"] = func(*app, []string) int { panic("boom SECRET") }
+	t.Cleanup(func() { delete(commands, "test-panic") })
+	a, _, errb := testApp(nil)
+	if code := a.run([]string{"test-panic"}); code != exitFail {
+		t.Errorf("code %d, want 1", code)
+	}
+	if !strings.Contains(errb.String(), "internal error") || strings.Contains(errb.String(), "goroutine") {
+		t.Errorf("stderr %q: want a short message, no stack trace", errb)
 	}
 }
 
@@ -99,6 +112,9 @@ func TestHelpAndVersion(t *testing.T) {
 	a, out, _ := testApp(nil)
 	if code := a.run([]string{"--help"}); code != 0 || !strings.Contains(out.String(), "Usage: blincli") {
 		t.Errorf("--help: %d %q", code, out)
+	}
+	if !strings.Contains(out.String(), "-v=false") {
+		t.Errorf("--help must say how to undo a pre-command boolean (-v=false):\n%s", out)
 	}
 	a, out, _ = testApp(nil)
 	if code := a.run([]string{"version"}); code != 0 || !strings.HasPrefix(out.String(), "blincli ") {
@@ -164,6 +180,11 @@ func TestCommandGlobalsOverridePreCommand(t *testing.T) {
 	if w := f.writes(); len(w) != 1 || w[0].Path != "/devices/dev/keys/idx:0" {
 		t.Errorf("writes = %+v", w)
 	}
+	// the documented way to undo a pre-command boolean
+	a, _, errb = testApp(map[string]string{"BLINKENKEYS_TOKEN": "tok"})
+	if code := a.run([]string{"-v", "set", "-v=false", "-u", srv.URL, "-d", "dev", "-k", "idx:0", "-c", "red"}); code != 0 || errb.Len() != 0 {
+		t.Errorf("-v ... -v=false: code %d, stderr %q", code, errb)
+	}
 }
 
 func TestPreCommandParseErrorExits64(t *testing.T) {
@@ -186,6 +207,46 @@ func TestURLUserinfoNeverPrinted(t *testing.T) {
 	if code := a.run([]string{"detect"}); code != 0 || !strings.Contains(out.String(), "127.0.0.1:9") ||
 		strings.Contains(out.String()+errb.String(), "PASSWD") {
 		t.Errorf("detect leaked userinfo (code %d):\nstdout %s\nstderr %s", code, out, errb)
+	}
+}
+
+func TestCommandHelpIsCommandSpecific(t *testing.T) {
+	for cmd, wants := range map[string][]string{
+		"detect": {"Usage: blincli detect", "sends nothing"},
+		"set":    {"Usage: blincli set", "-c, --color", "-m, --slots", "--if-detected"},
+		"get":    {"Usage: blincli get", "-a, --all", "--json"},
+	} {
+		a, out, _ := testApp(nil)
+		if code := a.run([]string{cmd, "-h"}); code != 0 {
+			t.Errorf("%s -h: code %d", cmd, code)
+		}
+		for _, w := range wants {
+			if !strings.Contains(out.String(), w) {
+				t.Errorf("%s -h lacks %q:\n%s", cmd, w, out)
+			}
+		}
+		if strings.Contains(out.String(), "--socket") && !strings.Contains(out.String(), "blincli --help") {
+			t.Errorf("%s -h: global options should be referenced, not repeated:\n%s", cmd, out)
+		}
+	}
+}
+
+func TestDetectHonorsQuietAndVerbose(t *testing.T) {
+	env := map[string]string{"CLAUDE_CODE_SESSION_ID": "s1", "BLINKENKEYS_SOCKET": "/x.sock"}
+	a, out, errb := testApp(env)
+	if code := a.run([]string{"detect", "-q"}); code != 0 || out.Len() != 0 {
+		t.Errorf("detect -q: code %d, stdout %q", code, out)
+	}
+	a, out, errb = testApp(env)
+	if code := a.run([]string{"-v", "detect"}); code != 0 || !strings.Contains(errb.String(), "CLAUDE_CODE_SESSION_ID") {
+		t.Errorf("detect -v: code %d, stdout %q, stderr %q; want the fallback variable named", code, out, errb)
+	}
+}
+
+func TestDetectWithEnvKeyShowsTerminalAndKey(t *testing.T) {
+	a, out, _ := testApp(map[string]string{"KITTY_WINDOW_ID": "4", "BLINKENKEYS_KEY": "idx:2", "BLINKENKEYS_SOCKET": "/x.sock"})
+	if code := a.run([]string{"detect"}); code != 0 || !strings.Contains(out.String(), "kitty") || !strings.Contains(out.String(), "idx:2") {
+		t.Errorf("code %d:\n%s", code, out)
 	}
 }
 
