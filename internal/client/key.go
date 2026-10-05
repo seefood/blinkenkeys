@@ -60,15 +60,19 @@ func PlanKey(in KeyInput) (Plan, error) {
 		if a, err := keyaddr.Parse(in.Name); err != nil || a.Kind != keyaddr.Name || in.Name == "." || in.Name == ".." {
 			return Plan{}, fmt.Errorf("%w: %q is not a usable key name (no led:/idx: prefix, not . or ..); use -k for a direct address", ErrUsage, in.Name)
 		}
+		if len(in.Name) > maxName {
+			return Plan{}, fmt.Errorf("%w: key names are limited to %d bytes", ErrUsage, maxName)
+		}
 		return Plan{Mode: ModeNamed, Base: in.Name, Name: in.Name, Owner: in.Name, Given: true}, nil
 	case in.ID.Tab > 0:
 		n := in.ID.Name()
-		return Plan{Mode: ModeSlot, Tab: in.ID.Tab, Base: n, Owner: n}, nil
+		return Plan{Mode: ModeSlot, Tab: in.ID.Tab, Base: n, Owner: fitName(n)}, nil
 	case in.ID.InstanceID != "":
 		n := in.ID.Name()
-		return Plan{Mode: ModeNamed, Base: n, Name: n, Owner: n}, nil
+		return Plan{Mode: ModeNamed, Base: n, Name: fitName(n), Owner: fitName(n)}, nil
 	case in.Fallback != "":
-		return Plan{Mode: ModeNamed, Base: in.Fallback, Name: in.Fallback, Owner: in.Fallback}, nil
+		n := in.Fallback
+		return Plan{Mode: ModeNamed, Base: n, Name: fitName(n), Owner: fitName(n)}, nil
 	default:
 		return Plan{}, fmt.Errorf("%w: pass -k KEY or -n NAME, or run inside a recognized terminal (checked tmux, iTerm2, WezTerm, kitty) or with one of $BLINKENKEYS_NAME, $CLAUDE_CODE_SESSION_ID, $ZELLIJ_PANE_ID, $STY, $WT_SESSION, $TERM_SESSION_ID set", ErrNoKey)
 	}
@@ -81,12 +85,29 @@ func (p Plan) Qualify(host string) Plan {
 	if host == "" || p.Base == "" || p.Mode == ModeExplicit || p.Given {
 		return p
 	}
-	q := host + "." + p.Base
+	q := fitName(host + "." + p.Base)
 	p.Owner = q
 	if p.Mode == ModeNamed {
 		p.Name = q
 	}
 	return p
+}
+
+// maxName is the daemon's limit on claim names and owner tags (1-128 bytes).
+const maxName = 128
+
+// fitName shortens a derived name over maxName bytes to a readable prefix
+// plus "-" and a 16-hex-digit FNV-1a hash of the whole name: deterministic,
+// and distinct long names stay distinct. Derived names are ASCII (termid
+// sanitizes them), so the byte cut never splits a rune.
+func fitName(s string) string {
+	if len(s) <= maxName {
+		return s
+	}
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(s))
+	sum := fmt.Sprintf("%016x", h.Sum64())
+	return s[:maxName-len(sum)-1] + "-" + sum
 }
 
 // DefaultTabs is idx 0..n-1.
