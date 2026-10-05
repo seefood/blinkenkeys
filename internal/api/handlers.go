@@ -26,13 +26,16 @@ type Dispatcher interface {
 	ListDevices(ctx context.Context) ([]dispatcher.DeviceSummary, error)
 	GetCapabilities(ctx context.Context, device string) (dispatcher.Capabilities, error)
 	ReleaseClaim(device, name string) error
+	Lookup(ctx context.Context, device string, addr keyaddr.Address) (keyaddr.Address, error)
 }
 
 // Writer is the effects engine: the only write path, so supersession is
 // enforced in one place. *effects.Engine implements it.
 type Writer interface {
 	SetColor(t effects.Target, c color.HSV) error
-	Start(t effects.Target, tl *effects.Timeline, now time.Time) error
+	SetColorFrom(t effects.Target, c color.HSV, o effects.Origin, now time.Time) error
+	StartFrom(t effects.Target, tl *effects.Timeline, now time.Time, o effects.Origin) error
+	Status(t effects.Target, now time.Time) (effects.Status, bool)
 }
 
 // Library resolves effect and template-state requests. *effects.Library
@@ -76,6 +79,7 @@ type writeBody struct {
 	Color  *string `json:"color"`
 	Effect *string `json:"effect"`
 	State  *string `json:"state"`
+	Owner  *string `json:"owner"` // optional tag recorded with the write; see releaseKey
 }
 
 func (h *Handler) writeKey(w http.ResponseWriter, r *http.Request) {
@@ -99,16 +103,24 @@ func (h *Handler) writeKey(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	if err := h.apply(effects.Target{Device: device, Addr: addr}, body); err != nil {
+	if err := h.apply(effects.Target{Device: device, Addr: addr}, body, time.Now()); err != nil {
 		writeError(w, statusFor(err), err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// releaseKey releases a named key's claim, returning it to the device's
-// unclaimed pool. Only a Name {pos} is accepted — a direct (R,C/led:/idx:)
-// address has no name to release by.
+// releaseKey blanks a key (cancelling any running effect) and, if {pos} is a
+// name, frees its claim. Any {pos} form is accepted: a direct (R,C/led:/idx:)
+// key has no claim, so it is only blanked. With ?owner=TAG the call is a
+// no-op (204) whenever a status record exists whose Owner differs (including
+// an empty Owner), so a session ending never blanks a key another session or
+// an untagged write has since taken over; it proceeds only when there is no
+// status record at all, or no ?owner=. If the blank fails, the claim is kept
+// and the error is returned.
+//
+// The key is resolved read-only (Lookup): resolving a name through Canonical
+// would claim it first, then blank and release the claim it just made.
 func (h *Handler) releaseKey(w http.ResponseWriter, r *http.Request) {
 	device, ok := h.disp.ResolveDevice(r.PathValue("name"))
 	if !ok {
@@ -120,26 +132,34 @@ func (h *Handler) releaseKey(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	if addr.Kind != keyaddr.Name {
-		writeError(w, http.StatusBadRequest, fmt.Errorf("%w: release requires a key name, got %q", errBadRequest, addr))
-		return
-	}
-	// Cancel any running effect and blank the key before freeing the claim
-	// — otherwise an effect started under this name (e.g. timer5min) keeps
-	// animating the LED indefinitely, since nothing else supersedes it once
-	// the name is unclaimed. Must resolve the canonical address (and blank)
-	// while the claim still exists: resolving after release would
-	// auto-allocate a fresh claim under this same name instead.
-	if canonical, cerr := h.disp.Canonical(r.Context(), device, addr); cerr == nil {
-		if err := h.w.SetColor(effects.Target{Device: device, Addr: canonical}, color.HSV{}); err != nil && h.logger != nil {
-			h.logger.Warn("blank-on-release failed", "device", device, "key", addr.Name, "err", err)
-		}
-	} else if h.logger != nil {
-		h.logger.Warn("could not resolve key to blank on release", "device", device, "key", addr.Name, "err", cerr)
-	}
-	if err := h.disp.ReleaseClaim(device, addr.Name); err != nil {
+	led, err := h.disp.Lookup(r.Context(), device, addr)
+	if err != nil {
 		writeError(w, statusFor(err), err)
 		return
+	}
+	target := effects.Target{Device: device, Addr: led}
+	if owner := r.URL.Query().Get("owner"); owner != "" {
+		if st, ok := h.w.Status(target, time.Now()); ok && st.Origin.Owner != owner {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+	}
+	// Blank before releasing: a still-running effect (e.g. timer5min) would
+	// otherwise keep animating an LED nothing owns anymore.
+	// If the blank fails, keep the claim: freeing it while the LED may still
+	// hold its color/effect would leave an orphaned, unowned key.
+	if err := h.w.SetColor(target, color.HSV{}); err != nil {
+		if h.logger != nil {
+			h.logger.Warn("blank-on-release failed", "device", device, "key", addr.String(), "err", err)
+		}
+		writeError(w, statusFor(err), err)
+		return
+	}
+	if addr.Kind == keyaddr.Name {
+		if err := h.disp.ReleaseClaim(device, addr.Name); err != nil {
+			writeError(w, statusFor(err), err)
+			return
+		}
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -160,32 +180,40 @@ func decodeWriteBody(r io.Reader) (writeBody, error) {
 	if n != 1 {
 		return b, fmt.Errorf("%w: body needs exactly one of color, effect, state", errBadRequest)
 	}
+	if b.Owner != nil && (len(*b.Owner) == 0 || len(*b.Owner) > 128) {
+		return b, fmt.Errorf("%w: owner must be 1-128 bytes", errBadRequest)
+	}
 	return b, nil
 }
 
-func (h *Handler) apply(t effects.Target, b writeBody) error {
+func (h *Handler) apply(t effects.Target, b writeBody, now time.Time) error {
+	owner := ""
+	if b.Owner != nil {
+		owner = *b.Owner
+	}
 	switch {
 	case b.Color != nil:
 		c, err := color.ParseHSV(*b.Color)
 		if err != nil {
 			return fmt.Errorf("%w: %v", errBadRequest, err)
 		}
-		return h.w.SetColor(t, c)
+		return h.w.SetColorFrom(t, c, effects.Origin{Type: "color", Ref: *b.Color, Owner: owner}, now)
 	case b.Effect != nil:
 		tl, err := h.lib.Effect(*b.Effect)
 		if err != nil {
 			return err
 		}
-		return h.w.Start(t, tl, time.Now())
+		return h.w.StartFrom(t, tl, now, effects.Origin{Type: "effect", Ref: *b.Effect, Owner: owner})
 	default:
 		act, err := h.lib.State(*b.State)
 		if err != nil {
 			return err
 		}
+		o := effects.Origin{Type: "state", Ref: *b.State, Owner: owner}
 		if act.Color != nil {
-			return h.w.SetColor(t, *act.Color)
+			return h.w.SetColorFrom(t, *act.Color, o, now)
 		}
-		return h.w.Start(t, act.Timeline, time.Now())
+		return h.w.StartFrom(t, act.Timeline, now, o)
 	}
 }
 
