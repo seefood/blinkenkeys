@@ -28,6 +28,8 @@ type fakeDispatcher struct {
 	releaseErr error
 	released   []string // device+"/"+name for each ReleaseClaim call
 	lookupErr  error
+	moved      *dispatcher.Moved // returned by Place
+	onPlace    func()
 	lookupAddr *keyaddr.Address // if set, Lookup returns this instead of echoing the address
 
 	info         dispatcher.KeyInfo
@@ -45,7 +47,7 @@ func (f *fakeDispatcher) CurrentColor(string, uint16) (color.HSV, bool) {
 	return *f.curColor, true
 }
 func (f *fakeDispatcher) Layout(string) dispatcher.Layout { return f.layout }
-func (f *fakeDispatcher) Connected(string) bool          { return !f.disconnected }
+func (f *fakeDispatcher) Connected(string) bool           { return !f.disconnected }
 
 func (f *fakeDispatcher) ResolveDevice(ref string) (string, bool) {
 	name, ok := f.devices[ref]
@@ -58,6 +60,14 @@ func (f *fakeDispatcher) Canonical(_ context.Context, _ string, a keyaddr.Addres
 		return keyaddr.Address{}, f.canonErr
 	}
 	return a, nil
+}
+
+func (f *fakeDispatcher) Place(ctx context.Context, device string, a keyaddr.Address) (keyaddr.Address, *dispatcher.Moved, error) {
+	if f.onPlace != nil {
+		f.onPlace()
+	}
+	a, err := f.Canonical(ctx, device, a)
+	return a, f.moved, err
 }
 
 func (f *fakeDispatcher) ListDevices(context.Context) ([]dispatcher.DeviceSummary, error) {
