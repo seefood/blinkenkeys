@@ -11,21 +11,12 @@ before writing any code — it is the authoritative spec for the single-binary
 you work, not the full rationale. `README.md` has the 6-phase product roadmap; only
 Phases 1–2 are speced/in scope right now.
 
-The only code that currently exists is `set_key_color.py` — a working,
-hardware-validated reference for the raw HID / VialRGB Direct protocol (device
-discovery via usage page `0xFF60`/usage `0x61`, `VIALRGB_SET_MODE`,
-`VIALRGB_DIRECT_FASTSET`). Treat it as the protocol ground truth when implementing
-the Go `internal/hid` package, not as code to build on top of. The Python daemon
-scaffold that used to sit alongside it (`pyproject.toml` / `uv.lock` /
-`.python-version` / `src/vialrgb_notify/`) has been removed — that PoC hit a dead
-end on macOS (see "Why not Python" in README.md: the Input Monitoring TCC grant
-requires a stable code-signing identity that an ad-hoc-signed `uv`-managed
-interpreter invocation doesn't have) and is superseded by the Go rewrite. **That
-original reason turned out to be wrong** — raw HID access to a vendor-defined usage
-page needs no Input Monitoring grant at all (see `CHANGELOG.md`'s
-Phase 1+2 entries) — but the Go decision itself stands regardless. The real implementation
-will be Go, following the package layout in the design spec (`cmd/blinkenkeysd/`,
-`internal/...`), none of which exists yet.
+Raw HID / VialRGB Direct protocol ground truth lives in `internal/hid/protocol.go`
+(device discovery via usage page `0xFF60`/usage `0x61`, `VIALRGB_SET_MODE`,
+`VIALRGB_DIRECT_FASTSET`). Raw HID access to that vendor-defined usage page needs no
+macOS Input Monitoring grant (see `CHANGELOG.md`'s Phase 1+2 entries). The implementation
+is Go, following the package layout in the design spec (`cmd/blinkenkeysd/`,
+`internal/...`).
 
 ## Commands
 
@@ -45,22 +36,6 @@ its own hidapi C sources), and on Linux, the `libudev-dev` headers (hidraw
 backend, the default). See the plan's "Verified ground truth" section
 (`docs/superpowers/plans/2026-09-23-blinkenkeys-phase1-2-implementation.md`)
 for exactly what was checked before relying on it.
-
-Python scaffold commands (still valid — `set_key_color.py` remains the
-protocol reference, not superseded):
-
-```
-uv run --with hidapi set_key_color.py    # protocol smoke test against real hardware
-```
-
-`set_key_color.py` has no `pyproject.toml` of its own anymore; `uv run --with` builds
-a throwaway env for its one dependency (`hidapi`) without needing one. Requires the
-`cxt_studio/12e4` board attached with the `personal/vialrgb-direct/001-enable`
-firmware branch flashed (see `../qmk_vial` and `../README.md` in the parent
-`CXT-studio` tree for how that firmware was built). On macOS this also requires the
-Input Monitoring TCC grant for whatever binary runs it — expect this to fail
-intermittently for exactly the code-signing-identity-instability reason documented
-above; that instability is *why* the real daemon is being written in Go.
 
 Test plan follows the design spec's "Testing" section: unit tests against fake HID
 backends and a fake dispatcher; real-hardware checks stay manual/gated (see
