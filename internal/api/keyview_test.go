@@ -143,6 +143,32 @@ func TestListKeysSortedByLED(t *testing.T) {
 	}
 }
 
+func TestGetKeyReportsFailedEffect(t *testing.T) {
+	led := keyaddr.Address{Kind: keyaddr.LED, N: 3}
+	disp := knownPad()
+	disp.lookupAddr = &led
+	w := &fakeWriter{status: map[effects.Target]effects.Status{ledTarget(3): {
+		Origin: effects.Origin{Type: "effect", Ref: "pulse"},
+		Effect: &effects.EffectStatus{Name: "pulse", Elapsed: 6 * time.Second, Failed: true},
+	}}}
+	rec := get(NewHandler(disp, w, &fakeLibrary{}, nil), "/devices/0/keys/idx:3")
+	var v struct {
+		Effect map[string]any `json:"effect"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &v); err != nil || v.Effect["failed"] != true {
+		t.Errorf("effect = %v, %v; want failed: true; body %s", v.Effect, err, rec.Body)
+	}
+	w.status[ledTarget(3)].Effect.Failed = false
+	rec = get(NewHandler(disp, w, &fakeLibrary{}, nil), "/devices/0/keys/idx:3")
+	v.Effect = nil
+	if err := json.Unmarshal(rec.Body.Bytes(), &v); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := v.Effect["failed"]; ok {
+		t.Errorf("failed must be omitted when false: %s", rec.Body)
+	}
+}
+
 func TestCapabilitiesIncludeLayout(t *testing.T) {
 	disp := knownPad()
 	disp.caps = dispatcher.Capabilities{LEDCount: 12}

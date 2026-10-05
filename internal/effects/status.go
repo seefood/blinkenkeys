@@ -18,6 +18,8 @@ type record struct {
 	setAt  time.Time
 	tl     *Timeline // nil unless the write started an effect
 	start  time.Time
+	// failedAt is when Tick dropped tl after a failed write; zero otherwise.
+	failedAt time.Time
 }
 
 // Status is a key's last request and, if it started an effect, progress.
@@ -28,12 +30,15 @@ type Status struct {
 }
 
 // EffectStatus is an effect's progress. Total is meaningful only if Finite.
+// Failed means the engine stopped the effect after a write failed; Elapsed
+// is then how far it got.
 type EffectStatus struct {
 	Name    string
 	Running bool
 	Elapsed time.Duration
 	Total   time.Duration
 	Finite  bool
+	Failed  bool
 }
 
 // statusLocked builds t's Status from rec; callers hold e.mu.
@@ -47,6 +52,11 @@ func (e *Engine) statusLocked(t Target, rec *record, now time.Time) Status {
 	if _, running := e.running[t]; running {
 		es.Running = true
 		if es.Elapsed = now.Sub(rec.start); es.Elapsed < 0 {
+			es.Elapsed = 0
+		}
+	} else if !rec.failedAt.IsZero() {
+		es.Failed = true
+		if es.Elapsed = rec.failedAt.Sub(rec.start); es.Elapsed < 0 {
 			es.Elapsed = 0
 		}
 	} else if finite {

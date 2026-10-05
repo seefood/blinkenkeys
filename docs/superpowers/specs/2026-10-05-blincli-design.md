@@ -216,6 +216,8 @@ engine drops finished effects and never records the original request):
     "effect":{"name":"breathe_orange","running":true,"elapsed_ms":12400,"duration_ms":null},
     "claim":{"last_write":"...","expires_at":"..."}}
    ```
+   `effect.failed: true` (omitted otherwise) means the engine stopped the effect after a write
+   failed; `elapsed_ms` is then how far it got, not a normal finish.
 3. `GET /devices/{name}/keys` — array of the same for every registered key.
 4. `PUT /devices/{name}/keys/{pos}` — optional `owner` body field.
 5. `DELETE /devices/{name}/keys/{pos}` — extended to accept direct addresses (currently 400 for

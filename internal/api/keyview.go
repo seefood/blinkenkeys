@@ -40,6 +40,7 @@ type effectView struct {
 	Running    bool   `json:"running"`
 	ElapsedMS  int64  `json:"elapsed_ms"`
 	DurationMS *int64 `json:"duration_ms"`
+	Failed     bool   `json:"failed,omitempty"` // stopped after a write failed
 }
 
 type claimView struct {
@@ -82,7 +83,7 @@ func (h *Handler) buildView(device string, led uint16, label string, now time.Ti
 	if st, ok := h.w.Status(effects.Target{Device: device, Addr: keyaddr.Address{Kind: keyaddr.LED, N: led}}, now); ok {
 		v.Source = &sourceView{Type: st.Origin.Type, Ref: st.Origin.Ref, Owner: st.Origin.Owner, SetAt: st.SetAt, AgeMS: now.Sub(st.SetAt).Milliseconds()}
 		if st.Effect != nil {
-			ev := &effectView{Name: st.Effect.Name, Running: st.Effect.Running, ElapsedMS: st.Effect.Elapsed.Milliseconds()}
+			ev := &effectView{Name: st.Effect.Name, Running: st.Effect.Running, ElapsedMS: st.Effect.Elapsed.Milliseconds(), Failed: st.Effect.Failed}
 			if st.Effect.Finite {
 				ms := st.Effect.Total.Milliseconds()
 				ev.DurationMS = &ms

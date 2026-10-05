@@ -1,6 +1,9 @@
 package effects
 
 import (
+	"errors"
+	"io"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -96,6 +99,54 @@ func TestSetColorFromCancelsRunningEffect(t *testing.T) {
 	st, _ := e.Status(tgt("a", 1), t0.Add(2*time.Second))
 	if st.Origin.Type != "color" || st.Effect != nil {
 		t.Errorf("status after supersede = %+v", st)
+	}
+}
+
+// A write the engine rejects leaves the previous status record untouched.
+func TestFailedWriteKeepsOldRecord(t *testing.T) {
+	out := &fakeSetter{}
+	e := NewEngine(out, nil)
+	t0 := time.Unix(1000, 0)
+	old := Origin{Type: "color", Ref: "red", Owner: "a"}
+	if err := e.SetColorFrom(tgt("a", 1), color.HSV{}, old, t0); err != nil {
+		t.Fatal(err)
+	}
+	out.err = errors.New("queue full")
+	if err := e.SetColorFrom(tgt("a", 1), color.HSV{}, Origin{Type: "color", Ref: "blue", Owner: "b"}, t0.Add(time.Second)); err == nil {
+		t.Fatal("SetColorFrom: want error")
+	}
+	if err := e.StartFrom(tgt("a", 1), statusTimeline(t, "pulse", tenSecondRed), t0.Add(time.Second), Origin{Type: "effect", Ref: "pulse"}); err == nil {
+		t.Fatal("StartFrom: want error")
+	}
+	if st, ok := e.Status(tgt("a", 1), t0.Add(2*time.Second)); !ok || st.Origin != old || !st.SetAt.Equal(t0) {
+		t.Errorf("Status = %+v, %v; want the old record", st, ok)
+	}
+}
+
+// An effect Tick drops after a failed write is reported as failed, at the
+// time it stopped, not as a normal finish.
+func TestTickWriteFailureMarksRecordFailed(t *testing.T) {
+	out := &fakeSetter{}
+	e := NewEngine(out, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	t0 := time.Unix(1000, 0)
+	tl := statusTimeline(t, "pulse", "stages:\n  - { duration: 5s, color: red }\n  - { duration: 5s, color: blue }\nfinal_state: \"#000000\"\n")
+	if err := e.StartFrom(tgt("a", 1), tl, t0, Origin{Type: "effect", Ref: "pulse"}); err != nil {
+		t.Fatal(err)
+	}
+	out.err = errors.New("gone")
+	e.Tick(t0.Add(6 * time.Second)) // frame changes to blue; write fails
+	st, ok := e.Status(tgt("a", 1), t0.Add(20*time.Second))
+	if !ok || st.Effect == nil {
+		t.Fatalf("Status = %+v, %v", st, ok)
+	}
+	if !st.Effect.Failed || st.Effect.Running || st.Effect.Elapsed != 6*time.Second {
+		t.Errorf("effect status = %+v, want Failed, not running, elapsed 6s", st.Effect)
+	}
+	// A later successful write replaces the record, clearing the marker.
+	out.err = nil
+	_ = e.StartFrom(tgt("a", 1), tl, t0.Add(30*time.Second), Origin{Type: "effect", Ref: "pulse"})
+	if st, _ := e.Status(tgt("a", 1), t0.Add(31*time.Second)); st.Effect == nil || st.Effect.Failed || !st.Effect.Running {
+		t.Errorf("restarted effect status = %+v", st.Effect)
 	}
 }
 

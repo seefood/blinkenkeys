@@ -127,6 +127,11 @@ func (e *Engine) Tick(now time.Time) {
 			if err := e.out.Write(t.Device, t.Addr, c); err != nil {
 				e.logger.Warn("effect write failed; stopping effect", "device", t.Device, "addr", t.Addr.String(), "err", err)
 				delete(e.running, t)
+				// Mark the record only if it describes this run (a plain
+				// Start drops the record, so another run's could remain).
+				if rec, ok := e.records[t]; ok && rec.tl == r.tl && rec.start.Equal(r.start) {
+					rec.failedAt = now
+				}
 				continue
 			}
 			r.last = c
