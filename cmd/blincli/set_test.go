@@ -208,6 +208,18 @@ func TestClearNamedFallsBackToSharedKeyAndTreats404AsDone(t *testing.T) {
 	}
 }
 
+func TestExplicitNameThatIsAnAddressOrDotSegmentIsUsageError(t *testing.T) {
+	for _, n := range []string{"led:3", "idx:2", ".", ".."} {
+		for _, cmd := range [][]string{{"set", "-c", "red"}, {"clear"}, {"get"}} {
+			f := &setFakeDaemon{}
+			a, errs := setDaemonApp(t, f, nil)
+			if code := a.run(append(cmd, "-n", n)); code != exitUsage || len(f.calls) != 0 {
+				t.Errorf("%v -n %q: code %d, calls %+v, stderr %q", cmd, n, code, f.calls, errs)
+			}
+		}
+	}
+}
+
 func TestClearIfDetectedWithNoKey(t *testing.T) {
 	f := &setFakeDaemon{}
 	a, _ := setDaemonApp(t, f, nil)

@@ -37,7 +37,7 @@ func TestPlanKeyNothingAvailable(t *testing.T) {
 }
 
 func TestPlanKeyRejectsUnsafeExplicitName(t *testing.T) {
-	for _, n := range []string{"a,b", "a/b"} {
+	for _, n := range []string{"a,b", "a/b", "led:3", "idx:2", "led:x", ".", ".."} {
 		if _, err := PlanKey(KeyInput{Name: n}); !errors.Is(err, ErrUsage) {
 			t.Errorf("%q: err = %v, want ErrUsage", n, err)
 		}

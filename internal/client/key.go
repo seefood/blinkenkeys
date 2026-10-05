@@ -6,6 +6,7 @@ import (
 	"math"
 	"strings"
 
+	"github.com/seefood/blinkenkeys/internal/keyaddr"
 	"github.com/seefood/blinkenkeys/internal/termid"
 )
 
@@ -52,6 +53,11 @@ func PlanKey(in KeyInput) (Plan, error) {
 	case in.Name != "":
 		if strings.ContainsAny(in.Name, ",/") {
 			return Plan{}, fmt.Errorf("%w: key names must not contain ',' or '/'", ErrUsage)
+		}
+		// The daemon would read led:N / idx:N as a direct address (a write,
+		// not a claim), and "." / ".." are not usable URL path segments.
+		if a, err := keyaddr.Parse(in.Name); err != nil || a.Kind != keyaddr.Name || in.Name == "." || in.Name == ".." {
+			return Plan{}, fmt.Errorf("%w: %q is not a usable key name (no led:/idx: prefix, not . or ..); use -k for a direct address", ErrUsage, in.Name)
 		}
 		return Plan{Mode: ModeNamed, Base: in.Name, Name: in.Name, Owner: in.Name}, nil
 	case in.ID.Tab > 0:
