@@ -113,9 +113,11 @@ func (h *Handler) writeKey(w http.ResponseWriter, r *http.Request) {
 // releaseKey blanks a key (cancelling any running effect) and, if {pos} is a
 // name, frees its claim. Any {pos} form is accepted: a direct (R,C/led:/idx:)
 // key has no claim, so it is only blanked. With ?owner=TAG the call is a
-// no-op (204) when the key's recorded owner is someone else, so a session
-// ending never blanks a key another session has since taken over; with no
-// recorded owner, or no ?owner=, it proceeds.
+// no-op (204) whenever a status record exists whose Owner differs (including
+// an empty Owner), so a session ending never blanks a key another session or
+// an untagged write has since taken over; it proceeds only when there is no
+// status record at all, or no ?owner=. If the blank fails, the claim is kept
+// and the error is returned.
 //
 // The key is resolved read-only (Lookup): resolving a name through Canonical
 // would claim it first, then blank and release the claim it just made.
@@ -144,8 +146,14 @@ func (h *Handler) releaseKey(w http.ResponseWriter, r *http.Request) {
 	}
 	// Blank before releasing: a still-running effect (e.g. timer5min) would
 	// otherwise keep animating an LED nothing owns anymore.
-	if err := h.w.SetColor(target, color.HSV{}); err != nil && h.logger != nil {
-		h.logger.Warn("blank-on-release failed", "device", device, "key", addr.String(), "err", err)
+	// If the blank fails, keep the claim: freeing it while the LED may still
+	// hold its color/effect would leave an orphaned, unowned key.
+	if err := h.w.SetColor(target, color.HSV{}); err != nil {
+		if h.logger != nil {
+			h.logger.Warn("blank-on-release failed", "device", device, "key", addr.String(), "err", err)
+		}
+		writeError(w, statusFor(err), err)
+		return
 	}
 	if addr.Kind == keyaddr.Name {
 		if err := h.disp.ReleaseClaim(device, addr.Name); err != nil {

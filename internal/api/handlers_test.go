@@ -352,3 +352,25 @@ func TestDeleteOwnerWithNoRecordProceeds(t *testing.T) {
 		t.Errorf("status %d, released %v", rec.Code, disp.released)
 	}
 }
+
+func TestDeleteBlankFailureSkipsRelease(t *testing.T) {
+	disp := knownPad()
+	w := &fakeWriter{err: errors.New("queue full")}
+	rec := del(t, NewHandler(disp, w, &fakeLibrary{}, nil), "/devices/0/keys/esc")
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want 503; %s", rec.Code, rec.Body)
+	}
+	if len(disp.released) != 0 {
+		t.Errorf("claim must not be released when blank failed, got %v", disp.released)
+	}
+}
+
+func TestDeleteOwnerWithEmptyOwnerRecordIsNoOp(t *testing.T) {
+	disp := knownPad()
+	target := effects.Target{Device: "uid-01", Addr: keyaddr.Address{Kind: keyaddr.Name, Name: "esc"}}
+	w := &fakeWriter{status: map[effects.Target]effects.Status{target: {}}}
+	rec := del(t, NewHandler(disp, w, &fakeLibrary{}, nil), "/devices/0/keys/esc?owner=mine")
+	if rec.Code != http.StatusNoContent || len(w.colors) != 0 || len(disp.released) != 0 {
+		t.Errorf("status %d colors %v released %v", rec.Code, w.colors, disp.released)
+	}
+}
