@@ -42,8 +42,16 @@ if [[ -f "$DEST_BIN" ]]; then
 	bin_removed=1
 fi
 
+DEST_CLI="$BIN_DIR/blincli"
+cli_removed=0
+if [[ -f "$DEST_CLI" ]]; then
+	rm -f "$DEST_CLI"
+	cli_removed=1
+fi
+
 echo
 echo "service:   $([[ $service_removed -eq 1 ]] && echo "disabled and stopped" || echo "was not loaded")"
 echo "unit:      $([[ $unit_removed -eq 1 ]] && echo "removed ($DEST_UNIT)" || echo "already absent")"
 echo "udev rule: $([[ $rule_removed -eq 1 ]] && echo "removed ($RULES_DEST)" || echo "already absent")"
 echo "binary:    $([[ $bin_removed -eq 1 ]] && echo "removed ($DEST_BIN)" || echo "already absent")"
+echo "cli:       $([[ $cli_removed -eq 1 ]] && echo "removed ($DEST_CLI)" || echo "already absent")"

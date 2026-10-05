@@ -32,7 +32,15 @@ if [[ -f "$DEST_BIN" ]]; then
 	bin_removed=1
 fi
 
+DEST_CLI="$BIN_DIR/blincli"
+cli_removed=0
+if [[ -f "$DEST_CLI" ]]; then
+	rm -f "$DEST_CLI"
+	cli_removed=1
+fi
+
 echo
 echo "agent:  $([[ $agent_removed -eq 1 ]] && echo "unloaded" || echo "was not loaded")"
 echo "plist:  $([[ $plist_removed -eq 1 ]] && echo "removed ($PLIST_DEST)" || echo "already absent")"
 echo "binary: $([[ $bin_removed -eq 1 ]] && echo "removed ($DEST_BIN)" || echo "already absent")"
+echo "cli:    $([[ $cli_removed -eq 1 ]] && echo "removed ($DEST_CLI)" || echo "already absent")"
