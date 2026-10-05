@@ -94,11 +94,11 @@ Order, first match wins:
    `hooks-basic.json`), then other known session ids **[unverified]**: `$ZELLIJ_PANE_ID`,
    `$STY` (GNU screen), `$WT_SESSION` (Windows Terminal), `$TERM_SESSION_ID`. The name is then
    placed according to the device's layout:
-   - the layout's `pool` is non-empty: ordinary named claim (daemon auto-assigns from the pool);
-   - the `pool` is empty (the user's pad: idx 6-11 are media keys): **shared** placement — the
-     client writes directly to `tabs[fnv1a(name) mod len(tabs)]` with `owner` = the name. Same
-     name always lands on the same key (no state, no leaked claim); collisions with tab slots
-     or other names follow the owner-tag policy below.
+   - ordinary named claim: the daemon auto-assigns the next free key from the layout's `pool`;
+   - **shared** placement when the pool is empty or exhausted (daemon answers 409): the client
+     writes directly to `tabs[fnv1a(name) mod len(tabs)]` with `owner` = the name. Same name
+     always lands on the same key (no state, no leaked claim); collisions with tab slots or
+     other names follow the owner-tag policy below.
 5. **No unique id anywhere** (no `-k`/`-n`, nothing in the env above): error, exit 64, with a
    message listing `-k`, `-n`, and the env vars checked. Never guess an identity (no tty-path or
    pid heuristics). `--if-detected` turns this into a silent exit 0.
@@ -135,7 +135,7 @@ Two sessions can map to one slot (tab 13 vs tab 1; `w0t0` vs `w1t0` in iTerm). P
   owner still matches; otherwise a no-op, exit 0. `--force` clears unconditionally. A session
   ending therefore never blanks a key another session has since taken.
 
-This policy is a recommendation not yet explicitly confirmed by the user.
+Adopted as the spec default; the user has not objected but has not explicitly confirmed it.
 
 ## Per-device key layout (daemon `config.yaml`)
 
@@ -146,13 +146,17 @@ Every pad differs, so which keys play which role is configuration, not code. New
 devices:
   - id: macropad
     keys:
-      tabs: [0-5]    # tab-number slots, in order; tab N -> tabs[(N-1) mod len]
-      pool: []       # keys the daemon may auto-assign to named claims; empty = none
-      # every other key (idx 6-11, media keys) is never touched by tabs or the pool
+      tabs: [0-5]        # tab N -> tabs[(N-1) mod len], in listed order
+      pool: [6-11]       # named claims are auto-assigned from here (media keys may blink)
 ```
 
+Key lists accept single indexes and ranges combined, as a YAML list or one string:
+`[0-4, 6, 8-10]` or `"0-4,6,8-10"`. Order is preserved as written (it matters for `tabs`);
+a range ascends. `pool: []` means no pool (named claims always use shared placement).
+
 - Absent `keys:` keeps today's behavior (pool = every key with row >= 1; `tabs` unset, so the
-  client falls back to idx 0..slots-1 with slots = 6).
+  client falls back to idx 0..slots-1 with slots = 6). `keys:` present with `pool` omitted:
+  today's default pool minus any `tabs` entries.
 - The daemon enforces it: `nextUnclaimedLocked` only offers `pool` keys; writes the daemon
   receives for a key outside `tabs` and `pool` are still allowed (explicit `-k` always works).
 - `GET /devices/{name}` (capabilities) gains `layout: {tabs, pool}` so a remote `blincli`
@@ -218,7 +222,5 @@ registered · 69 daemon unreachable · 77 auth missing/rejected · 78 no config/
 
 ## Open items
 
-- Interpretation to confirm: "named sessions start at idx 6" vs. "idx 6-11 are media keys": this
-  spec reads it as *pool is empty on this pad, names share the tab slots*.
 - Owner-tag collision policy: pending explicit confirmation.
 - All **[unverified]** entries: verify before implementing the corresponding piece.
