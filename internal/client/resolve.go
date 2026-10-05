@@ -137,6 +137,11 @@ func (r Resolver) httpEndpoint(raw, src string, o Options, fc FileConfig) (Endpo
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		return Endpoint{}, fmt.Errorf("%w: %q is not an http(s) URL", ErrUsage, redactURL(raw))
 	}
+	// API paths are appended to the URL as text; a path prefix works, a
+	// query or fragment would end up in front of them.
+	if strings.ContainsAny(raw, "?#") {
+		return Endpoint{}, fmt.Errorf("%w: %q: the daemon URL must not have a query or fragment", ErrUsage, redactURL(raw))
+	}
 	tok, err := r.token(o, fc)
 	if err != nil {
 		return Endpoint{}, err

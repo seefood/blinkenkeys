@@ -66,6 +66,22 @@ func TestResolveTokenFileAndMissingToken(t *testing.T) {
 	}
 }
 
+// A query or fragment would be concatenated raw in front of every API path;
+// a path is a base prefix (e.g. behind a reverse proxy) and is kept.
+func TestResolveURLQueryRejectedPathKept(t *testing.T) {
+	r, _ := resolverFor(t, map[string]string{"BLINKENKEYS_TOKEN": "tok"})
+	for _, u := range []string{"http://h:1/?x=1", "http://h:1?x=1", "http://h:1/#frag", "http://h:1/api?", "http://h:1/api?x=1"} {
+		if _, _, err := r.Resolve(Options{URL: u}); !errors.Is(err, ErrUsage) {
+			t.Errorf("%s: err = %v, want ErrUsage", u, err)
+		}
+	}
+	for u, want := range map[string]string{"http://h:1/": "http://h:1", "http://h:1/api/": "http://h:1/api", "http://h:1/api": "http://h:1/api"} {
+		if ep, _, err := r.Resolve(Options{URL: u}); err != nil || ep.BaseURL != want {
+			t.Errorf("%s: %+v %v, want base %s", u, ep, err, want)
+		}
+	}
+}
+
 // Review Focus 5: a remote URL without a token is rejected at resolve time
 // (before any request can be built), including https, and an unreadable token
 // file is also ErrAuth; error text must not leak a token.
