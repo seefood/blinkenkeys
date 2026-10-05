@@ -208,6 +208,31 @@ func TestConfigInitPermsAndShowNeverLeaksToken(t *testing.T) {
 	}
 }
 
+func TestBadConfigDoesNotPrintToken(t *testing.T) {
+	for _, body := range []string{
+		"token: SECRETTOKEN123\nurll: x\n",
+		"url: http://h:1\ntoken: SECRETTOKEN123\nslots: x\n",
+		"token: SECRETTOKEN123\nurl: [unterminated\n",
+	} {
+		for _, args := range [][]string{{"config", "show"}, {"set", "-k", "idx:0", "-c", "red"}, {"get", "-k", "idx:0"}, {"detect"}} {
+			a, path, out, errs := cfgApp(t, map[string]string{"BLINKENKEYS_SOCKET": "/nonexistent/api.sock"})
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			code := a.run(append([]string{"-C", path}, args...))
+			if code == 0 && args[0] != "detect" {
+				t.Errorf("%v on a bad config exited 0", args)
+			}
+			if strings.Contains(out.String()+errs.String(), "SECRETTOKEN123") {
+				t.Errorf("%v leaked the token:\nstdout %s\nstderr %s", args, out, errs)
+			}
+		}
+	}
+}
+
 func TestConfigBadFlagIs64(t *testing.T) {
 	a, _, _, _ := cfgApp(t, nil)
 	for _, sub := range []string{"init", "show", "path"} {

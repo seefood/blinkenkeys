@@ -56,7 +56,10 @@ func LoadFile(path string) (fc FileConfig, exists bool, err error) {
 		return FileConfig{}, false, fmt.Errorf("blincli config: %w", err)
 	}
 	if err := yaml.UnmarshalWithOptions(data, &fc, yaml.DisallowUnknownField()); err != nil {
-		return FileConfig{}, true, fmt.Errorf("blincli config %s: %w", path, err)
+		// goccy's Error() quotes the surrounding source lines, which can hold
+		// the token: report only "[line:col] message" and drop the chain.
+		msg, _, _ := strings.Cut(yaml.FormatError(err, false, false), "\n")
+		return FileConfig{}, true, fmt.Errorf("blincli config %s: %s", path, msg)
 	}
 	return fc, true, nil
 }
