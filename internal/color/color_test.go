@@ -53,3 +53,20 @@ func TestParseHSV(t *testing.T) {
 		t.Error("ParseHSV(not-a-color): want error")
 	}
 }
+
+func TestHSVHex(t *testing.T) {
+	tests := []struct {
+		in   HSV
+		want string
+	}{
+		{HSV{H: 0, S: 255, V: 255}, "#ff0000"},
+		{HSV{H: 0, S: 0, V: 255}, "#ffffff"},
+		{HSV{H: 123, S: 77, V: 0}, "#000000"},
+		{HSV{H: 0, S: 0, V: 128}, "#808080"},
+	}
+	for _, tt := range tests {
+		if got := tt.in.Hex(); got != tt.want {
+			t.Errorf("%+v.Hex() = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}

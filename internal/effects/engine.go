@@ -40,29 +40,51 @@ type Engine struct {
 	mu      sync.Mutex
 	out     Setter
 	running map[Target]*running
+	records map[Target]*record
 	logger  *slog.Logger
 }
 
 // NewEngine creates an Engine writing through out.
 func NewEngine(out Setter, logger *slog.Logger) *Engine {
-	return &Engine{out: out, running: make(map[Target]*running), logger: logger}
+	return &Engine{out: out, running: make(map[Target]*running), records: make(map[Target]*record), logger: logger}
 }
 
 // SetColor writes c to t and cancels any effect running there (without its
-// final_state — the new color replaces it immediately).
+// final_state — the new color replaces it immediately). It records nothing:
+// it is the internal blanking path, so it also drops t's status record.
 func (e *Engine) SetColor(t Target, c color.HSV) error {
+	return e.setColor(t, c, nil)
+}
+
+// SetColorFrom is SetColor that remembers o as t's last request.
+func (e *Engine) SetColorFrom(t Target, c color.HSV, o Origin, now time.Time) error {
+	return e.setColor(t, c, &record{origin: o, setAt: now})
+}
+
+func (e *Engine) setColor(t Target, c color.HSV, rec *record) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if err := e.out.Write(t.Device, t.Addr, c); err != nil {
 		return err
 	}
 	delete(e.running, t)
+	e.putRecord(t, rec)
 	return nil
 }
 
 // Start writes tl's first frame to t and runs tl there from now on,
-// replacing any effect already running on t without its final_state.
+// replacing any effect already running on t without its final_state. It
+// records nothing (and drops t's status record); see StartFrom.
 func (e *Engine) Start(t Target, tl *Timeline, now time.Time) error {
+	return e.start(t, tl, now, nil)
+}
+
+// StartFrom is Start that remembers o as t's last request.
+func (e *Engine) StartFrom(t Target, tl *Timeline, now time.Time, o Origin) error {
+	return e.start(t, tl, now, &record{origin: o, setAt: now, tl: tl, start: now})
+}
+
+func (e *Engine) start(t Target, tl *Timeline, now time.Time, rec *record) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	c, _ := tl.At(0)
@@ -70,7 +92,18 @@ func (e *Engine) Start(t Target, tl *Timeline, now time.Time) error {
 		return err
 	}
 	e.running[t] = &running{tl: tl, start: now, last: c}
+	e.putRecord(t, rec)
 	return nil
+}
+
+// putRecord stores rec as t's record, or drops t's record if rec is nil.
+// Callers hold e.mu.
+func (e *Engine) putRecord(t Target, rec *record) {
+	if rec == nil {
+		delete(e.records, t)
+		return
+	}
+	e.records[t] = rec
 }
 
 // Tick advances every running effect to now: writes each frame that

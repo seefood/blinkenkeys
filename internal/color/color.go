@@ -131,3 +131,38 @@ func ParseHSV(s string) (HSV, error) {
 	h, sat, v, err := Parse(s)
 	return HSV{H: h, S: sat, V: v}, err
 }
+
+// Hex renders c as "#rrggbb" using QMK's integer HSV->RGB conversion, so the
+// result matches what the keyboard shows.
+func (c HSV) Hex() string {
+	r, g, b := c.rgb()
+	return fmt.Sprintf("#%02x%02x%02x", r, g, b)
+}
+
+func (c HSV) rgb() (r, g, b uint8) {
+	if c.S == 0 {
+		return c.V, c.V, c.V
+	}
+	region := c.H / 43
+	rem := (uint16(c.H) - uint16(region)*43) * 6
+	v, s := uint16(c.V), uint16(c.S)
+	// Each product is at most 255*255 = 65025 (fits uint16) and the >>8
+	// leaves at most 254, so the uint8 conversions cannot truncate.
+	p := uint8((v * (255 - s)) >> 8)                        // #nosec G115 -- bounded <= 254
+	q := uint8((v * (255 - ((s * rem) >> 8))) >> 8)         // #nosec G115 -- bounded <= 254
+	t := uint8((v * (255 - ((s * (255 - rem)) >> 8))) >> 8) // #nosec G115 -- bounded <= 254
+	switch region {
+	case 0:
+		return c.V, t, p
+	case 1:
+		return q, c.V, p
+	case 2:
+		return p, c.V, t
+	case 3:
+		return p, q, c.V
+	case 4:
+		return t, p, c.V
+	default:
+		return c.V, p, q
+	}
+}
