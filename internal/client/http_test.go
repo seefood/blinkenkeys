@@ -4,11 +4,65 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
+
+func TestDevicesAndListKeysDecode(t *testing.T) {
+	c := serve(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/devices" {
+			_, _ = w.Write([]byte(`[{"name":"d1","connected":true},{"name":"d2","connected":false}]`))
+			return
+		}
+		_, _ = w.Write([]byte(`[{"device":"d","key":"idx:0"},{"device":"d","key":"idx:1"}]`))
+	})
+	devs, err := c.Devices(context.Background())
+	if err != nil || len(devs) != 2 || devs[0].Name != "d1" || !devs[0].Connected {
+		t.Errorf("devices = %+v, %v", devs, err)
+	}
+	keys, err := c.ListKeys(context.Background(), "d")
+	if err != nil || len(keys) != 2 || keys[1].Key != "idx:1" {
+		t.Errorf("keys = %+v, %v", keys, err)
+	}
+}
+
+func TestClientFormattingNeverShowsToken(t *testing.T) {
+	const secret = "s3cr3t-sentinel"
+	c := New(Endpoint{Kind: "http", BaseURL: "http://h", Token: secret})
+	for _, v := range []any{c, *c} {
+		for _, f := range []string{"%v", "%+v", "%#v", "%s"} {
+			if got := fmt.Sprintf(f, v); strings.Contains(got, secret) {
+				t.Errorf("%s of %T leaks token: %s", f, v, got)
+			}
+		}
+	}
+}
+
+func TestUnreachableKeepsCause(t *testing.T) {
+	c := serve(t, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(204) })
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := c.Put(ctx, "d", "k", PutBody{Color: "red"})
+	if !errors.Is(err, ErrUnreachable) || !errors.Is(err, context.Canceled) {
+		t.Errorf("err = %v, want ErrUnreachable and context.Canceled", err)
+	}
+}
+
+func TestNonJSONErrorBodyFallsBackToStatusText(t *testing.T) {
+	c := serve(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte("<html>oops</html>"))
+	})
+	err := c.Put(context.Background(), "d", "k", PutBody{Color: "red"})
+	var ae *APIError
+	if !errors.As(err, &ae) || ae.Message != "Bad Gateway" {
+		t.Errorf("err = %v", err)
+	}
+}
 
 func serve(t *testing.T, h http.HandlerFunc) *Client {
 	t.Helper()

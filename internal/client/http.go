@@ -36,6 +36,13 @@ func New(ep Endpoint) *Client {
 	return &Client{ep: ep, base: base, hc: &http.Client{Transport: tr, Timeout: 5 * time.Second}}
 }
 
+// String and GoString are on the value receiver so both Client and *Client
+// format safely: the embedded Endpoint holds the bearer token.
+func (c Client) String() string { return "client(" + c.ep.String() + ")" }
+
+// GoString implements fmt.GoStringer; see String.
+func (c Client) GoString() string { return c.String() }
+
 // APIError is a non-2xx response from the daemon.
 type APIError struct {
 	Status  int
@@ -81,7 +88,7 @@ func (c *Client) do(ctx context.Context, method, path string, in, out any) error
 	}
 	resp, err := c.hc.Do(req)
 	if err != nil {
-		return fmt.Errorf("%w: %v", ErrUnreachable, err)
+		return fmt.Errorf("%w: %w", ErrUnreachable, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 300 {
@@ -89,6 +96,9 @@ func (c *Client) do(ctx context.Context, method, path string, in, out any) error
 			Error string `json:"error"`
 		}
 		_ = json.NewDecoder(io.LimitReader(resp.Body, 1<<16)).Decode(&e)
+		if e.Error == "" {
+			e.Error = http.StatusText(resp.StatusCode)
+		}
 		return &APIError{Status: resp.StatusCode, Message: e.Error}
 	}
 	if out == nil || resp.StatusCode == http.StatusNoContent {
@@ -168,13 +178,15 @@ type KeyStatus struct {
 // Devices lists devices.
 func (c *Client) Devices(ctx context.Context) ([]DeviceSummary, error) {
 	var out []DeviceSummary
-	return out, c.do(ctx, http.MethodGet, "/devices", nil, &out)
+	err := c.do(ctx, http.MethodGet, "/devices", nil, &out)
+	return out, err
 }
 
 // Capabilities fetches a device's LED layout and key layout hint.
 func (c *Client) Capabilities(ctx context.Context, device string) (Capabilities, error) {
 	var out Capabilities
-	return out, c.do(ctx, http.MethodGet, "/devices/"+url.PathEscape(device), nil, &out)
+	err := c.do(ctx, http.MethodGet, "/devices/"+url.PathEscape(device), nil, &out)
+	return out, err
 }
 
 // Put writes a color, effect or state to key.
@@ -194,11 +206,13 @@ func (c *Client) Delete(ctx context.Context, device, key, owner string) error {
 // GetKey reads one key's registration and state.
 func (c *Client) GetKey(ctx context.Context, device, key string) (KeyStatus, error) {
 	var out KeyStatus
-	return out, c.do(ctx, http.MethodGet, keyPath(device, key), nil, &out)
+	err := c.do(ctx, http.MethodGet, keyPath(device, key), nil, &out)
+	return out, err
 }
 
 // ListKeys reads every registered key on device.
 func (c *Client) ListKeys(ctx context.Context, device string) ([]KeyStatus, error) {
 	var out []KeyStatus
-	return out, c.do(ctx, http.MethodGet, "/devices/"+url.PathEscape(device)+"/keys", nil, &out)
+	err := c.do(ctx, http.MethodGet, "/devices/"+url.PathEscape(device)+"/keys", nil, &out)
+	return out, err
 }
