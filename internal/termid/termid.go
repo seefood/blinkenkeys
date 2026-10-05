@@ -45,7 +45,11 @@ const helperTimeout = 500 * time.Millisecond
 
 // ExecRun is the real Env.Run.
 func ExecRun(ctx context.Context, name string, args ...string) (string, error) {
-	out, err := exec.CommandContext(ctx, name, args...).Output() // #nosec G204 -- name/args are literals chosen by this package's resolvers
+	c := exec.CommandContext(ctx, name, args...) // #nosec G204 -- name/args are literals chosen by this package's resolvers
+	// Without WaitDelay, a grandchild holding stdout open keeps Output()
+	// blocked after the context kills the direct child.
+	c.WaitDelay = 100 * time.Millisecond
+	out, err := c.Output()
 	return string(out), err
 }
 
@@ -65,8 +69,15 @@ func Detect(ctx context.Context, env Env) Identity {
 var unsafeName = regexp.MustCompile(`[^A-Za-z0-9._-]`)
 
 // Sanitize makes s safe as a key name: names must not contain "," (it would
-// parse as row,col) or "/" (a single URL path segment).
-func Sanitize(s string) string { return unsafeName.ReplaceAllString(s, "-") }
+// parse as row,col) or "/" (a single URL path segment). A result of "." or
+// ".." is not a usable path segment and becomes "" (no name).
+func Sanitize(s string) string {
+	s = unsafeName.ReplaceAllString(s, "-")
+	if s == "." || s == ".." {
+		return ""
+	}
+	return s
+}
 
 func detectTmux(ctx context.Context, env Env) (Identity, bool) {
 	pane := env.Getenv("TMUX_PANE")

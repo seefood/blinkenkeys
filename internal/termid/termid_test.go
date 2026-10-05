@@ -131,6 +131,39 @@ func TestExecRunHangingHelperIsBounded(t *testing.T) {
 	}
 }
 
+// A helper whose grandchild keeps stdout open must not outlive the context:
+// without cmd.WaitDelay, Output() blocks until the pipe closes.
+func TestExecRunGrandchildHoldingStdoutIsBounded(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	type result struct{ err error }
+	done := make(chan result, 1)
+	start := time.Now()
+	go func() {
+		_, err := ExecRun(ctx, "sh", "-c", "sleep 30 & wait")
+		done <- result{err}
+	}()
+	select {
+	case r := <-done:
+		if r.err == nil {
+			t.Error("expected error from killed helper")
+		}
+		if d := time.Since(start); d > 2*time.Second {
+			t.Errorf("ExecRun not bounded by ctx: %v", d)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("ExecRun hung: grandchild holding stdout kept Output() blocked past the deadline")
+	}
+}
+
+func TestSanitizeDotSegments(t *testing.T) {
+	for in, want := range map[string]string{".": "", "..": "", "...": "...", "a.b": "a.b", "": ""} {
+		if got := Sanitize(in); got != want {
+			t.Errorf("Sanitize(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestFallbackNameOrderAndSanitize(t *testing.T) {
 	get := func(m map[string]string) func(string) string { return func(k string) string { return m[k] } }
 	name, src := FallbackName(get(map[string]string{"CLAUDE_CODE_SESSION_ID": "abc-123", "STY": "x"}))
