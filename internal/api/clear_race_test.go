@@ -83,6 +83,24 @@ func TestConditionalDeleteDoesNotBlankRacingWrite(t *testing.T) {
 	}
 }
 
+// F8 ruling (spec "Collisions"): status records are in-memory, so after a
+// daemon restart a conditional clear finds no record and proceeds — it
+// blanks the key even if another session has since lit it (via a write the
+// restarted daemon has no record of). Pinned so a change is deliberate.
+func TestConditionalDeleteWithNoRecordBlanks(t *testing.T) {
+	eng, out := newRealEngine() // fresh engine: what a restarted daemon has
+	led := keyaddr.Address{Kind: keyaddr.LED, N: 3}
+	out.buf[led] = color.HSV{H: 170, S: 255, V: 255}
+	disp := knownPad()
+	disp.lookupAddr = &led
+	if rec := del(t, NewHandler(disp, eng, &fakeLibrary{}, nil), "/devices/0/keys/idx:3?owner=stale-session"); rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d; %s", rec.Code, rec.Body)
+	}
+	if c := out.get(led); c != (color.HSV{}) {
+		t.Errorf("color = %+v, want blanked (no record => proceed)", c)
+	}
+}
+
 // Same race with real goroutines, for -race. Whichever request runs first,
 // the other owner's PUT succeeded, so it must be what the key ends up with:
 // DELETE-first blanks and then the PUT lands; PUT-first makes the DELETE a

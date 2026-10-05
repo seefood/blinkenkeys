@@ -134,7 +134,14 @@ Two sessions can map to one slot (tab 13 vs tab 1; `w0t0` vs `w1t0` in iTerm). P
 - A new write simply takes the key.
 - `clear` is conditional: the CLI sends its owner, the daemon blanks/releases only if the recorded
   owner still matches; otherwise a no-op, exit 0. `--force` clears unconditionally. A session
-  ending therefore never blanks a key another session has since taken.
+  ending therefore never blanks a key another session has since taken. The owner check and the
+  blank are atomic in the engine (`effects.Engine.ClearIfOwner`), so a racing write by another
+  owner is never blanked.
+- Decided limitation: status records are in-memory only. A conditional clear that finds **no**
+  record proceeds and blanks. After a daemon restart (records gone) a stale session's `clear`
+  therefore blanks the key even if another session lit it before the restart; the daemon does
+  not refuse record-less conditional clears. Rewriting a key after a restart restores the
+  protection.
 
 #### Direct write vs. named claim (`keys.collision`)
 

@@ -166,3 +166,12 @@ model" section)
   out-of-range pool entries are skipped at claim time and an out-of-range tab
   slot write returns 404. Writes queued before capabilities are known
   (`applyPending`) always use last-wins, even under `displace`.
+- **2026-10-06**: Daemon follow-ups. A conditional `DELETE ?owner=` checks
+  the owner and blanks atomically (`effects.Engine.ClearIfOwner`), so a racing
+  write by another owner is no longer blanked. Decided, not fixed: a
+  conditional clear with no status record proceeds and blanks, so after a
+  daemon restart a stale session's `clear` can blank a key another session
+  lit before the restart (records are in-memory only). Key views report
+  `effect.failed: true` when the engine stopped an effect after a write
+  failure. A YAML null key list (`pool: ~`) means unset (the default pool),
+  same as omitting it.
