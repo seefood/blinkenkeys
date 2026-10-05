@@ -1,0 +1,19 @@
+{
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [ { "type": "command", "command": "blincli set -s claude/idle" } ] }
+    ],
+    "UserPromptSubmit": [
+      { "hooks": [ { "type": "command", "command": "blincli set -s claude/working" } ] }
+    ],
+    "Stop": [
+      { "hooks": [ { "type": "command", "command": "blincli set -s claude/idle" } ] }
+    ],
+    "PermissionRequest": [
+      { "hooks": [ { "type": "command", "command": "blincli set -s claude/waiting" } ] }
+    ],
+    "SessionEnd": [
+      { "hooks": [ { "type": "command", "command": "blincli clear" } ] }
+    ]
+  }
+}
