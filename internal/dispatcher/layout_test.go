@@ -2,8 +2,12 @@ package dispatcher
 
 import (
 	"errors"
+	"slices"
 	"testing"
 	"time"
+
+	"github.com/seefood/blinkenkeys/internal/color"
+	"github.com/seefood/blinkenkeys/internal/keyaddr"
 )
 
 // sixLEDPad has LED i at matrix (row i/2, col i%2): reading-order idx == LED index.
@@ -60,6 +64,44 @@ func TestNoLayoutKeepsLegacyPool(t *testing.T) {
 	}
 	if l := r.Layout("a"); !l.DefaultPool {
 		t.Errorf("Layout with none set = %+v, want DefaultPool", l)
+	}
+}
+
+// Pending writes resolved by SetCaps honor the layout: a pending name claims
+// from the configured pool in listed order, and a later pending direct write
+// onto that key is last-wins (the claim is released, never displaced), even
+// with collision: displace — see the spec's applyPending note.
+func TestSetCapsResolvesPendingNamedWritesUnderLayout(t *testing.T) {
+	r := NewRegistry()
+	r.Declare("a")
+	r.SetLayout("a", Layout{Tabs: []uint16{0, 1}, Pool: []uint16{5, 4}, Displace: true})
+	x := keyaddr.Address{Kind: keyaddr.Name, Name: "x"}
+	y := keyaddr.Address{Kind: keyaddr.Name, Name: "y"}
+	r.CapsOrPend("a", PendingWrite{Addr: x, Color: color.HSV{H: 1}})
+	r.CapsOrPend("a", PendingWrite{Addr: y, Color: color.HSV{H: 2}})
+	r.CapsOrPend("a", PendingWrite{Addr: keyaddr.Address{Kind: keyaddr.Idx, N: 5}, Color: color.HSV{H: 3}})
+
+	caps := Capabilities{LEDCount: 6}
+	for i := uint16(0); i < 6; i++ {
+		caps.Positions = append(caps.Positions, LEDPosition{Index: i, Row: uint8(i / 2), Col: uint8(i % 2)})
+	}
+	var applied []uint16
+	var hues []uint8
+	r.SetCaps("a", caps, func(idx uint16, c color.HSV) {
+		applied, hues = append(applied, idx), append(hues, c.H)
+	}, func(w PendingWrite, err error) { t.Errorf("dropped %s: %v", w.Addr, err) })
+
+	if !slices.Equal(applied, []uint16{5, 4, 5}) || !slices.Equal(hues, []uint8{1, 2, 3}) {
+		t.Fatalf("applied idx %v hues %v, want [5 4 5] [1 2 3]", applied, hues)
+	}
+	if _, _, err := r.LookupClaim("a", "x"); !errors.Is(err, ErrClaimNotFound) {
+		t.Errorf("x must be released by the pending direct write (last-wins), err = %v", err)
+	}
+	if idx, _, err := r.LookupClaim("a", "y"); err != nil || idx != 4 {
+		t.Errorf("y = %d, %v; want 4", idx, err)
+	}
+	if info := r.KeyInfo("a", 5); !info.Direct || info.Name != "" {
+		t.Errorf("LED 5 = %+v, want direct-owned", info)
 	}
 }
 
