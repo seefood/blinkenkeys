@@ -68,6 +68,13 @@ func (r *Registry) KeyInfo(device string, idx uint16) KeyInfo {
 // be claimed (ErrClaimNotFound otherwise) and is neither claimed nor
 // refreshed; any other form resolves against the matrix without being
 // marked claimed-by-direct. Contrast Canonical, which does both.
+//
+// "Without side effects" covers claims and ownership only: a non-name addr
+// on a device whose capabilities are not yet known fetches them first
+// (GetCapabilities: one HID query via the dispatcher goroutine, stored on
+// the slot, and resolving any pending writes), exactly as a write would.
+// That is deliberate: resolving R,C/idx: needs the matrix, and the fetch is
+// idempotent. A name never triggers it.
 func (d *Dispatcher) Lookup(ctx context.Context, device string, addr keyaddr.Address) (keyaddr.Address, error) {
 	if addr.Kind == keyaddr.Name {
 		idx, _, err := d.registry.LookupClaim(device, addr.Name)
