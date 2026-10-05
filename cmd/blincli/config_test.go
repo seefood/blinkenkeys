@@ -110,11 +110,81 @@ func TestConfigShowMasksToken(t *testing.T) {
 }
 
 func TestVerboseNeverPrintsToken(t *testing.T) {
-	f := &setFakeDaemon{}
+	f := &setFakeDaemon{tabs: []uint16{0, 1, 2, 3, 4, 5}}
 	a, errs := setDaemonApp(t, f, setItermEnv())
-	a.run([]string{"set", "-c", "red", "-v"})
-	if strings.Contains(errs.String(), "tok") && strings.Contains(errs.String(), "token tok") || strings.Contains(errs.String(), "Bearer") {
+	if code := a.run([]string{"set", "-c", "red", "-v"}); code != 0 {
+		t.Fatalf("code %d: %s", code, errs)
+	}
+	if errs.Len() == 0 {
+		t.Fatal("expected verbose output")
+	}
+	if strings.Contains(errs.String(), a.getenv("BLINKENKEYS_TOKEN")) || strings.Contains(errs.String(), "Bearer") {
 		t.Errorf("verbose leaked the token:\n%s", errs)
+	}
+}
+
+func TestConfigShowRedactsURLUserinfo(t *testing.T) {
+	a, path, out, _ := cfgApp(t, nil)
+	_ = os.MkdirAll(filepath.Dir(path), 0o700)
+	_ = os.WriteFile(path, []byte("url: http://u:pw@h:1\n"), 0o600)
+	if code := a.run([]string{"config", "show", "-C", path}); code != 0 {
+		t.Fatal(code)
+	}
+	if strings.Contains(out.String(), "pw") || !strings.Contains(out.String(), "h:1") {
+		t.Errorf("show leaked userinfo:\n%s", out)
+	}
+}
+
+func TestConfigInitForceTightensModeAndWritesToken(t *testing.T) {
+	a, path, _, _ := cfgApp(t, nil)
+	_ = os.MkdirAll(filepath.Dir(path), 0o700)
+	_ = os.WriteFile(path, []byte("old\n"), 0o644)
+	if code := a.run([]string{"config", "init", "-C", path, "--force", "--token", "s3cr3t"}); code != 0 {
+		t.Fatal(code)
+	}
+	fi, _ := os.Stat(path)
+	if fi.Mode().Perm() != 0o600 {
+		t.Errorf("mode %v, want 0600", fi.Mode().Perm())
+	}
+	if b, _ := os.ReadFile(path); !strings.Contains(string(b), `token: "s3cr3t"`) {
+		t.Errorf("token not written:\n%s", b)
+	}
+}
+
+func TestConfigInitForceReplacesSymlinkNotTarget(t *testing.T) {
+	a, path, _, _ := cfgApp(t, nil)
+	_ = os.MkdirAll(filepath.Dir(path), 0o700)
+	target := filepath.Join(t.TempDir(), "victim")
+	_ = os.WriteFile(target, []byte("victim\n"), 0o644)
+	if err := os.Symlink(target, path); err != nil {
+		t.Fatal(err)
+	}
+	if code := a.run([]string{"config", "init", "-C", path, "--token", "t"}); code != exitUsage {
+		t.Errorf("symlink without --force: %d, want 64", code)
+	}
+	if code := a.run([]string{"config", "init", "-C", path, "--force", "--token", "t"}); code != 0 {
+		t.Fatal(code)
+	}
+	if b, _ := os.ReadFile(target); string(b) != "victim\n" {
+		t.Errorf("symlink target modified: %q", b)
+	}
+	if fi, err := os.Lstat(path); err != nil || fi.Mode()&os.ModeSymlink != 0 || fi.Mode().Perm() != 0o600 {
+		t.Errorf("link not replaced by 0600 file: %v %v", fi, err)
+	}
+}
+
+func TestConfigInitDanglingSymlinkNeedsForce(t *testing.T) {
+	a, path, _, _ := cfgApp(t, nil)
+	_ = os.MkdirAll(filepath.Dir(path), 0o700)
+	target := filepath.Join(t.TempDir(), "nope")
+	if err := os.Symlink(target, path); err != nil {
+		t.Fatal(err)
+	}
+	if code := a.run([]string{"config", "init", "-C", path}); code != exitUsage {
+		t.Errorf("code %d, want 64", code)
+	}
+	if _, err := os.Lstat(target); err == nil {
+		t.Error("dangling target was created")
 	}
 }
 
@@ -122,6 +192,9 @@ func TestConfigInitPermsAndShowNeverLeaksToken(t *testing.T) {
 	a, path, out, _ := cfgApp(t, nil)
 	if code := a.run([]string{"config", "init", "-C", path, "-t", "s3cretvalue"}); code != 0 {
 		t.Fatal(code)
+	}
+	if fi, err := os.Stat(path); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Errorf("file mode: %v %v", fi, err)
 	}
 	di, err := os.Stat(filepath.Dir(path))
 	if err != nil || di.Mode().Perm() != 0o700 {

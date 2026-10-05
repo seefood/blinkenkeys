@@ -16,9 +16,9 @@ import (
 // Sentinels the command layer maps to exit codes.
 var (
 	ErrNoEndpoint  = errors.New("no blinkenkeysd endpoint configured") // exit 78
-	ErrUnreachable = errors.New("blinkenkeysd unreachable")             // exit 69
-	ErrAuth        = errors.New("bearer token missing or rejected")     // exit 77
-	ErrUsage       = errors.New("usage error")                          // exit 64
+	ErrUnreachable = errors.New("blinkenkeysd unreachable")            // exit 69
+	ErrAuth        = errors.New("bearer token missing or rejected")    // exit 77
+	ErrUsage       = errors.New("usage error")                         // exit 64
 )
 
 // Options are the endpoint-related command-line values.
@@ -53,7 +53,10 @@ func (e Endpoint) GoString() string { return e.String() }
 
 // redactURL masks userinfo passwords; an unparseable URL is not echoed at all,
 // because url.Parse errors quote the input.
-func redactURL(raw string) string {
+func redactURL(raw string) string { return RedactURL(raw) }
+
+// RedactURL is redactURL for callers outside the package (config show).
+func RedactURL(raw string) string {
 	u, err := url.Parse(raw)
 	if err != nil {
 		return "<unparseable url>"

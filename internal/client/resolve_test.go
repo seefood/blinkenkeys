@@ -224,3 +224,9 @@ func TestResolveNothingConfigured(t *testing.T) {
 		t.Errorf("empty config: err = %v", err)
 	}
 }
+
+func TestRedactURLExported(t *testing.T) {
+	if got := RedactURL("http://u:pw@h:1"); strings.Contains(got, "pw") {
+		t.Errorf("RedactURL leaked: %q", got)
+	}
+}

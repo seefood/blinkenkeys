@@ -3,7 +3,9 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
+	iofs "io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -58,7 +60,7 @@ func (a *app) configShow(args []string) int {
 		return exitOK
 	}
 	_, _ = fmt.Fprintf(a.stdout, "# %s\n%s", path, renderConfig(client.FileConfig{
-		URL: fc.URL, Socket: fc.Socket, Token: maskIf(fc.Token), TokenFile: fc.TokenFile, Device: fc.Device, Slots: fc.Slots,
+		URL: client.RedactURL(fc.URL), Socket: fc.Socket, Token: maskIf(fc.Token), TokenFile: fc.TokenFile, Device: fc.Device, Slots: fc.Slots,
 	}))
 	return exitOK
 }
@@ -108,8 +110,12 @@ func (a *app) configInit(args []string) int {
 		return code
 	}
 	path := a.configPathFor(g)
-	if _, err := os.Stat(path); err == nil && !force {
+	// Lstat: a symlink (even a dangling one) counts as existing.
+	switch _, err := os.Lstat(path); {
+	case err == nil && !force:
 		return a.fail(fmt.Errorf("%w: %s already exists (use --force to overwrite)", client.ErrUsage, path))
+	case err != nil && !errors.Is(err, iofs.ErrNotExist):
+		return a.fail(err)
 	}
 	fc := client.FileConfig{URL: g.URL, Socket: g.Socket, Token: g.Token, TokenFile: g.TokenFile, Device: g.Device, Slots: slots}
 	if interactive {
@@ -185,13 +191,25 @@ func writeConfig(path, content string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600) // #nosec G304 -- operator-chosen config path
+	// Temp file (created 0600 by CreateTemp) + rename: the final mode is always
+	// 0600 and an existing symlink is replaced rather than written through.
+	f, err := os.CreateTemp(filepath.Dir(path), ".blincli-*.tmp")
 	if err != nil {
 		return err
 	}
+	tmp := f.Name()
 	if _, err := f.WriteString(content); err != nil {
 		_ = f.Close()
+		_ = os.Remove(tmp)
 		return err
 	}
-	return f.Close()
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
 }
