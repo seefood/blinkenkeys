@@ -1,6 +1,6 @@
 # blincli design
 
-Status: design draft, not implemented. Unverified items are marked **[unverified]** and must be
+Status: design draft, not implemented; the owner-tag and `keys.collision` policies are adopted. Unverified items are marked **[unverified]** and must be
 checked against official docs before the code relying on them is written.
 
 `blincli` is a client for `blinkenkeysd`'s HTTP API. It replaces hand-written `curl` calls in
@@ -115,9 +115,9 @@ tmux panes).
 
 | Terminal | Tab number | Instance id (fallback name) | Status |
 |---|---|---|---|
-| tmux | `tmux display -p -t $TMUX_PANE '#{window_index}'` | `$TMUX_PANE` | **[unverified]** |
-| iTerm2 | `t` field of `$ITERM_SESSION_ID` (`w0t1p0:UUID`) | `w0t1p0` | **[unverified]**: 0- vs 1-based; whether `t` tracks tab reorder/close or is fixed at creation; `wNtN` repeats across windows |
-| WezTerm | tab position via `wezterm cli list --format json` | `$WEZTERM_PANE` (verified: monotonic mux-lifetime counter) | CLI output shape **[unverified]** |
+| tmux | `tmux display -p -t $TMUX_PANE '#{window_index}'` | `$TMUX_PANE` | verified (`window_index` and `base-index` both work) |
+| iTerm2 | `t` field of `$ITERM_SESSION_ID` (`w0t1p0:UUID`) | `w0t1p0` | zero-based (docs); the env var is fixed when the shell starts, so it goes **stale** after tab reorder/close (accepted limitation); `wNtN` repeats across windows |
+| WezTerm | tab position via `wezterm cli list --format json` | `$WEZTERM_PANE` (verified: monotonic mux-lifetime counter) | JSON shape verified (`window_id`, `tab_id`, `pane_id`); no tab-position field, so tab number = rank of `tab_id` in list order (ordering **[unverified]**) |
 | kitty | `kitten @ ls` (needs remote control enabled) | `$KITTY_WINDOW_ID` | **[unverified]**; tab number likely skipped |
 
 The resolver table lives in `internal/termid` so adding a terminal is one entry. Resolvers that
@@ -126,7 +126,8 @@ exec a helper bound it with a short timeout and treat failure as "no tab number"
 ### Collisions
 
 Two sessions can map to one slot (tab 13 vs tab 1; `w0t0` vs `w1t0` in iTerm). Policy:
-**last writer wins, with an owner tag.**
+**last writer wins, with an owner tag.** A second, per-device policy governs a *direct*
+(location-addressed) write landing on a key a **named claim** holds — see below.
 
 - `set` carries an optional `owner` string (derived terminal identity, hostname-prefixed when
   remote). The engine's status record stores it; `get` displays it.
@@ -135,7 +136,20 @@ Two sessions can map to one slot (tab 13 vs tab 1; `w0t0` vs `w1t0` in iTerm). P
   owner still matches; otherwise a no-op, exit 0. `--force` clears unconditionally. A session
   ending therefore never blanks a key another session has since taken.
 
-Adopted as the spec default; the user has not objected but has not explicitly confirmed it.
+#### Direct write vs. named claim (`keys.collision`)
+
+Per device, in the `keys:` block:
+
+- `last-wins` (default): the direct write takes the key; the named claim is released (its next
+  write claims a fresh key).
+- `displace`: the claim moves to the next unclaimed `pool` key (pool order), and its last request
+  (color / effect / state, with its owner tag) is replayed there; a running effect restarts. If no
+  pool key is free it degrades to `last-wins` and the daemon logs a warning. The incoming write is
+  always applied, and a request with an invalid body displaces nothing.
+
+Two direct writers on one key are always last-wins. Writes queued before a device's capabilities
+are known always use `last-wins` (they are resolved under the registry lock, with no engine
+access to replay a request).
 
 ## Per-device key layout (daemon `config.yaml`)
 
@@ -148,6 +162,7 @@ devices:
     keys:
       tabs: [0-5]        # tab N -> tabs[(N-1) mod len], in listed order
       pool: [6-11]       # named claims are auto-assigned from here (media keys may blink)
+      collision: last-wins   # or displace; see Collisions
 ```
 
 Key lists accept single indexes and ranges combined, as a YAML list or one string:
@@ -203,7 +218,7 @@ engine drops finished effects and never records the original request):
    non-names): blanks the key; optional `?owner=` makes it conditional. Named keys still release
    the claim.
 
-## Exit codes (sysexits; none is 2 — Claude Code hooks may treat exit 2 as blocking **[unverified]**)
+## Exit codes (sysexits; none is 2 — Claude Code hooks treat exit 2 as blocking on `Stop`/`UserPromptSubmit`, verified)
 
 0 ok · 1 daemon returned an error · 64 usage / no key or device determinable · 66 key not
 registered · 69 daemon unreachable · 77 auth missing/rejected · 78 no config/endpoint.
@@ -215,12 +230,14 @@ registered · 69 daemon unreachable · 77 auth missing/rejected · 78 no config/
 - `make build` also builds `bin/blincli`; both platforms' `install.sh` install `blincli`
   alongside the daemon.
 - `integrations/claude/hooks-blincli.json`: the five events of `hooks-basic.json` using
-  `blincli set -s claude/{idle,working,waiting} --if-detected` and `blincli clear --if-detected`.
+  `blincli set -s claude/{idle,working,waiting}` and `blincli clear` (no `--if-detected`: inside
+  Claude Code `$CLAUDE_CODE_SESSION_ID` is always set, so a real misconfiguration should surface
+  as a non-blocking hook error).
 - `integrations/claude/README.md`: blincli section; `hooks-wezterm-pane.json` and its section
   stay as the raw-curl example.
 - Daemon config: per-device key layout (next section).
 
 ## Open items
 
-- Owner-tag collision policy: pending explicit confirmation.
-- All **[unverified]** entries: verify before implementing the corresponding piece.
+- Remaining **[unverified]** entries (WezTerm tab ordering, kitty, zellij/screen/Windows-Terminal
+  variables): verify before implementing the corresponding piece.

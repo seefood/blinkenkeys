@@ -4,7 +4,7 @@
 
 **Goal:** Ship `blincli`, a GNU-style client for `blinkenkeysd`'s HTTP API that finds the daemon, derives the right key from the calling terminal, and can read a key's state back — plus the daemon changes (key layout config, owner tags, status records, read endpoints) that needs.
 
-**Architecture:** The daemon gains a per-device key layout (`tabs`/`pool` lists in `config.yaml`), a status record per key kept by `effects.Engine` (the only write path), an optional `owner` tag on writes, conditional `DELETE`, and read-only `GET /devices/{name}/keys[/{pos}]`. `blincli` is a pure-Go (no cgo, never imports `internal/hid`/`dispatcher`) client in `cmd/blincli` + `internal/termid` (terminal → tab number/instance id) + `internal/client` (endpoint resolution, HTTP, key planning). Stdlib `flag` only.
+**Architecture:** The daemon gains a per-device key layout (`tabs`/`pool` lists in `config.yaml`), a status record per key kept by `effects.Engine` (the only write path), an optional `owner` tag on writes, conditional `DELETE`, and read-only `GET /devices/{name}/keys[/{pos}]`. `blincli` is a pure-Go (no cgo, never imports `internal/hid`/`dispatcher`) client in `cmd/blincli` + `internal/termid` (terminal → tab number/instance id) + `internal/client` (endpoint resolution, HTTP, key planning). Stdlib `flag` only. Collisions between a direct (location-addressed) write and a named claim are per-device configurable (`keys.collision: last-wins | displace`).
 
 **Tech Stack:** Go 1.27.1, stdlib `flag`/`net/http`, `github.com/goccy/go-yaml` (already a dependency). No new dependencies.
 
@@ -17,6 +17,7 @@
 - `blincli` never prompts except under explicit `config init --interactive`/`-i`, and that exits 64 when stdin is not a TTY.
 - Exit codes (sysexits; **never 2** — Claude Code treats hook exit 2 as blocking on `Stop`/`UserPromptSubmit`, verified in the hooks docs): `0` ok, `1` daemon error, `64` usage / no key or device determinable, `66` key not registered (`get`), `69` daemon unreachable, `77` auth missing/rejected, `78` no config/endpoint.
 - Option style: GNU — every option has a `--long` form, common ones also a one-letter form; dual registration with stdlib `flag` (one `FlagSet` per subcommand; no bundled short flags; flags precede positionals).
+- Collision policy is per device: `keys.collision` is `last-wins` (default: a direct write takes the key and releases a named claim on it) or `displace` (the named claim moves to the next unclaimed pool key and its last request is re-applied there; if the pool is full it degrades to `last-wins` with a warning). Two *direct* writers on one key are always last-wins; the `owner` tag only guards `clear`.
 - Colors are QMK native HSV (0–255 per channel); the shared parser is `internal/color`.
 - Tab-slot default modulus is **6** (`idx:0..5`) when the daemon reports no layout; named-claim fallback names must not contain `,` or `/`.
 - A token is required for `http(s)://` endpoints, optional for the Unix socket.
@@ -43,6 +44,7 @@ Failure modes the spec implies that the per-feature tests would not otherwise co
 4. A terminal helper that is missing, hangs, or prints garbage (`wezterm cli`, `tmux` with no server) must degrade to the named fallback, never hang the hook. (Task 8)
 5. A remote URL with no token must exit 77 *before* any request is sent, and a token must never appear in `-v` output or `config show`. (Tasks 9, 11, 14)
 6. A flag parse error must exit 64, never Go's default 2. (Task 11)
+7. `displace` with a full pool must still complete the incoming write (claim released, warning logged), and a request with a bad body must not displace anything. (Task 6b)
 
 ## File Structure
 
@@ -50,6 +52,7 @@ Failure modes the spec implies that the per-feature tests would not otherwise co
 - `config/keylist.go`, `config/keylist_test.go` — `KeyList` YAML type (`[0-4, 6, 8-10]` / `"0-4,6"`), `KeyLayout`.
 - `internal/dispatcher/layout.go`, `internal/dispatcher/layout_test.go` — `Layout`, registry layout storage, layout-aware pool.
 - `internal/dispatcher/lookup.go`, `internal/dispatcher/lookup_test.go` — read-only `LookupClaim`, `KeyInfo`, dispatcher `Lookup`/`KeyInfo`/`CurrentColor`/`Layout`/`Connected`.
+- `internal/dispatcher/place.go`, `internal/dispatcher/place_test.go` — `Moved`, `MarkDirectDisplacing`, `Dispatcher.Place` (collision policy).
 - `internal/effects/status.go`, `internal/effects/status_test.go` — `Origin`, `Status`, engine records.
 - `internal/api/keyview.go`, `internal/api/keyview_test.go` — JSON view of a key + `GET` handlers.
 - `internal/termid/termid.go`, `internal/termid/termid_test.go`
@@ -78,7 +81,7 @@ Failure modes the spec implies that the per-feature tests would not otherwise co
 - Modify: `config/config.go` (`DeviceDecl`, validation in `Load`)
 
 **Interfaces:**
-- Produces: `config.KeyList` (`[]uint16`, YAML-decodable from `[0-4, 6, 8-10]` or `"0-4,6,8-10"`; an explicit empty list decodes to a **non-nil** empty slice, an omitted key stays nil); `config.KeyLayout{Tabs, Pool KeyList}`; `DeviceDecl.Keys *KeyLayout` (`yaml:"keys"`).
+- Produces: `config.KeyList` (`[]uint16`, YAML-decodable from `[0-4, 6, 8-10]` or `"0-4,6,8-10"`; an explicit empty list decodes to a **non-nil** empty slice, an omitted key stays nil); `config.KeyLayout{Tabs, Pool KeyList; Collision string}` (`Collision` is `""`, `"last-wins"` or `"displace"`; anything else fails `Load`); `DeviceDecl.Keys *KeyLayout` (`yaml:"keys"`).
 
 - [ ] **Step 1: Write the failing tests** — `config/keylist_test.go`:
 
@@ -168,6 +171,32 @@ devices:
 	cfg2, err := Load(writeConfig(t, "devices:\n  - id: a\n    keys:\n      tabs: [0-1]\n"))
 	if err != nil || cfg2.Devices[0].Keys.Pool != nil {
 		t.Errorf("omitted pool must stay nil (default pool): %+v, %v", cfg2.Devices[0].Keys, err)
+	}
+}
+
+func TestLoadKeyLayoutCollision(t *testing.T) {
+	cfg, err := Load(writeConfig(t, "devices:
+  - id: a
+    keys:
+      collision: displace
+"))
+	if err != nil || cfg.Devices[0].Keys.Collision != "displace" {
+		t.Fatalf("displace: %+v, %v", cfg, err)
+	}
+	cfg, err = Load(writeConfig(t, "devices:
+  - id: a
+    keys:
+      tabs: [0]
+"))
+	if err != nil || cfg.Devices[0].Keys.Collision != "" {
+		t.Errorf("omitted collision must stay empty (last-wins): %+v, %v", cfg, err)
+	}
+	if _, err := Load(writeConfig(t, "devices:
+  - id: a
+    keys:
+      collision: nope
+")); err == nil {
+		t.Error("unknown collision policy must be rejected")
 	}
 }
 
@@ -303,9 +332,19 @@ type DeviceDecl struct {
 type KeyLayout struct {
 	Tabs KeyList `yaml:"tabs"`
 	Pool KeyList `yaml:"pool"`
+	// Collision says what a direct (location-addressed) write does to a
+	// named claim sitting on the key it targets: "last-wins" (default, ""):
+	// the claim is released; "displace": the claim moves to the next
+	// unclaimed pool key.
+	Collision string `yaml:"collision"`
 }
 
 func (l *KeyLayout) validate() error {
+	switch l.Collision {
+	case "", "last-wins", "displace":
+	default:
+		return fmt.Errorf("collision %q: want last-wins or displace", l.Collision)
+	}
 	owner := make(map[uint16]string)
 	for _, role := range []struct {
 		name string
@@ -357,7 +396,7 @@ git commit -m "Add per-device key layout (tabs/pool) with list/range syntax"
 
 **Interfaces:**
 - Consumes: Task 1's shape (daemon wiring comes in Task 7; this task only needs the `Layout` type).
-- Produces: `dispatcher.Layout{Tabs, Pool []uint16; DefaultPool bool}`, `dispatcher.DefaultLayout`, `(*Registry).SetLayout(device string, l Layout)`, `(*Registry).Layout(device string) Layout`. `nextUnclaimedLocked(s *slot, l Layout)`, `claimOrGetLocked(s *slot, l Layout, name string, now time.Time)`, `resolveLocked(s *slot, l Layout, addr keyaddr.Address, now time.Time)` (unexported; the only callers are in `claims.go` and `registry.go`'s `SetCaps`).
+- Produces: `dispatcher.Layout{Tabs, Pool []uint16; DefaultPool, Displace bool}`, `dispatcher.DefaultLayout`, `(*Registry).SetLayout(device string, l Layout)`, `(*Registry).Layout(device string) Layout`. `nextUnclaimedLocked(s *slot, l Layout)`, `claimOrGetLocked(s *slot, l Layout, name string, now time.Time)`, `resolveLocked(s *slot, l Layout, addr keyaddr.Address, now time.Time)` (unexported; the only callers are in `claims.go` and `registry.go`'s `SetCaps`).
 
 - [ ] **Step 1: Write the failing tests** — `internal/dispatcher/layout_test.go`:
 
@@ -460,6 +499,10 @@ type Layout struct {
 	Tabs        []uint16
 	Pool        []uint16
 	DefaultPool bool
+	// Displace selects the collision policy: a direct write onto a named
+	// claim moves the claim to the next unclaimed pool key (see
+	// MarkDirectDisplacing) instead of releasing it.
+	Displace bool
 }
 
 // DefaultLayout is what a device with no configured layout gets.
@@ -1813,6 +1856,330 @@ git commit -m "API: GET key/keys status endpoints; layout hint in device capabil
 
 ---
 
+### Task 6b: Collision policy — `displace`
+
+**Files:**
+- Create: `internal/dispatcher/place.go`, `internal/dispatcher/place_test.go`
+- Modify: `internal/api/handlers.go`, `internal/api/handlers_test.go`
+
+**Interfaces:**
+- Consumes: Task 2 `Layout.Displace`, `nextUnclaimedLocked(s, l)`, `markDirectLocked`; Task 4 `Origin{Type, Ref, Owner}`, `Writer.Status`; Task 5 `apply(t, b, now)`, `decodeWriteBody`, `writeBody`.
+- Produces:
+  ```go
+  // dispatcher
+  type Moved struct {
+  	Name     string // the claim that held the key; "" = no claim was there
+  	From, To uint16 // LED indexes; To is valid only when !Dropped
+  	Dropped  bool   // no free pool key: the claim was released (last-wins fallback)
+  }
+  func (r *Registry) MarkDirectDisplacing(device string, idx uint16) Moved
+  func (d *Dispatcher) Place(ctx context.Context, device string, addr keyaddr.Address) (keyaddr.Address, *Moved, error)
+  // api.Dispatcher gains Place; Handler.writeKey uses it instead of Canonical.
+  ```
+  `Place` behaves exactly like `Canonical` except that a direct address onto a named claim, on a device whose layout has `Displace`, moves the claim to the next unclaimed pool key (`nextUnclaimedLocked` — pool order, not "after idx") instead of releasing it. It returns a non-nil `*Moved` only when a claim actually moved. `Canonical` itself is unchanged (last-wins).
+
+- [ ] **Step 1: Write the failing tests.** `internal/dispatcher/place_test.go` (uses `registryWithCaps`/`sixLEDPad` from `layout_test.go`/`claims_test.go`):
+
+```go
+package dispatcher
+
+import (
+	"errors"
+	"testing"
+	"time"
+)
+
+func TestDisplaceMovesNamedClaimToNextPoolKey(t *testing.T) {
+	r := registryWithCaps(t, "a", sixLEDPad())
+	r.SetLayout("a", Layout{Pool: []uint16{4, 5}, Displace: true})
+	if got, err := r.ClaimOrGet("a", "x", time.Now()); err != nil || got != 4 {
+		t.Fatalf("setup claim = %d, %v", got, err)
+	}
+	m := r.MarkDirectDisplacing("a", 4)
+	if want := (Moved{Name: "x", From: 4, To: 5}); m != want {
+		t.Fatalf("Moved = %+v, want %+v", m, want)
+	}
+	if got, err := r.ClaimOrGet("a", "x", time.Now()); err != nil || got != 5 {
+		t.Errorf("x now at %d, %v; want 5", got, err)
+	}
+	// key 4 is direct-owned now: the pool (4, 5) has nothing left for a new name.
+	if _, err := r.ClaimOrGet("a", "y", time.Now()); !errors.Is(err, ErrNoUnclaimedKeys) {
+		t.Errorf("err = %v, want ErrNoUnclaimedKeys", err)
+	}
+}
+
+func TestDisplaceWithFullPoolDropsTheClaim(t *testing.T) {
+	r := registryWithCaps(t, "a", sixLEDPad())
+	r.SetLayout("a", Layout{Pool: []uint16{4}, Displace: true})
+	if _, err := r.ClaimOrGet("a", "x", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	m := r.MarkDirectDisplacing("a", 4)
+	if want := (Moved{Name: "x", From: 4, Dropped: true}); m != want {
+		t.Fatalf("Moved = %+v, want %+v", m, want)
+	}
+	if _, err := r.ClaimOrGet("a", "x", time.Now()); !errors.Is(err, ErrNoUnclaimedKeys) {
+		t.Errorf("claim must be gone and key 4 direct-owned: err = %v", err)
+	}
+}
+
+func TestLastWinsReleasesTheClaim(t *testing.T) {
+	r := registryWithCaps(t, "a", sixLEDPad())
+	r.SetLayout("a", Layout{Pool: []uint16{4, 5}}) // Displace unset
+	if _, err := r.ClaimOrGet("a", "x", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	m := r.MarkDirectDisplacing("a", 4)
+	if m.Name != "x" || !m.Dropped {
+		t.Errorf("Moved = %+v, want x dropped", m)
+	}
+	if got, err := r.ClaimOrGet("a", "x", time.Now()); err != nil || got != 5 {
+		t.Errorf("x reclaims the next free key: %d, %v; want 5", got, err)
+	}
+}
+
+func TestDisplaceOnUnclaimedOrDirectKeyJustMarksDirect(t *testing.T) {
+	r := registryWithCaps(t, "a", sixLEDPad())
+	r.SetLayout("a", Layout{Pool: []uint16{4, 5}, Displace: true})
+	if m := r.MarkDirectDisplacing("a", 4); m.Name != "" {
+		t.Errorf("unclaimed key: Moved = %+v, want zero", m)
+	}
+	if m := r.MarkDirectDisplacing("a", 4); m.Name != "" {
+		t.Errorf("direct key (two direct writers are last-wins): Moved = %+v, want zero", m)
+	}
+	if got, err := r.ClaimOrGet("a", "x", time.Now()); err != nil || got != 5 {
+		t.Errorf("claim = %d, %v; want 5 (4 is direct-owned)", got, err)
+	}
+}
+```
+
+`internal/api/handlers_test.go`: give `fakeDispatcher` a `moved *dispatcher.Moved` field and
+
+```go
+func (f *fakeDispatcher) Place(ctx context.Context, device string, a keyaddr.Address) (keyaddr.Address, *dispatcher.Moved, error) {
+	a, err := f.Canonical(ctx, device, a)
+	return a, f.moved, err
+}
+```
+then add:
+
+```go
+func TestPutDisplacedClaimIsReappliedOnItsNewKey(t *testing.T) {
+	disp := knownPad()
+	disp.moved = &dispatcher.Moved{Name: "x", From: 3, To: 4}
+	from := effects.Target{Device: "uid-01", Addr: keyaddr.Address{Kind: keyaddr.LED, N: 3}}
+	to := effects.Target{Device: "uid-01", Addr: keyaddr.Address{Kind: keyaddr.LED, N: 4}}
+	w := &fakeWriter{status: map[effects.Target]effects.Status{
+		from: {Origin: effects.Origin{Type: "color", Ref: "red", Owner: "s1"}},
+	}}
+	h := NewHandler(disp, w, &fakeLibrary{}, nil)
+	if rec := put(t, h, "/devices/0/keys/led:3", `{"color":"blue"}`); rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d; %s", rec.Code, rec.Body)
+	}
+	if len(w.colors) != 2 || w.colors[0] != from || w.colors[1] != to {
+		t.Fatalf("writes = %+v, want incoming on 3 then displaced on 4", w.colors)
+	}
+	if w.origins[1] != (effects.Origin{Type: "color", Ref: "red", Owner: "s1"}) {
+		t.Errorf("carried origin = %+v", w.origins[1])
+	}
+}
+
+func TestPutBadBodyDisplacesNothing(t *testing.T) {
+	disp := knownPad()
+	disp.moved = &dispatcher.Moved{Name: "x", From: 3, To: 4}
+	placed := false
+	disp.onPlace = func() { placed = true }
+	h := NewHandler(disp, &fakeWriter{}, &fakeLibrary{}, nil)
+	if rec := put(t, h, "/devices/0/keys/led:3", `{"color":"red","effect":"x"}`); rec.Code != 400 {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+	if placed {
+		t.Error("Place ran before the body was validated")
+	}
+}
+
+func TestPutDisplacedWithNoStatusOrDroppedWritesOnlyTheIncoming(t *testing.T) {
+	for _, m := range []*dispatcher.Moved{
+		{Name: "x", From: 3, To: 4},          // moved, but nothing recorded to carry
+		{Name: "x", From: 3, Dropped: true}, // pool full: handler must not touch To
+	} {
+		disp := knownPad()
+		disp.moved = m
+		w := &fakeWriter{}
+		h := NewHandler(disp, w, &fakeLibrary{}, nil)
+		if rec := put(t, h, "/devices/0/keys/led:3", `{"color":"blue"}`); rec.Code != http.StatusNoContent {
+			t.Fatalf("%+v: status = %d", m, rec.Code)
+		}
+		if len(w.colors) != 1 {
+			t.Errorf("%+v: writes = %+v, want only the incoming one", m, w.colors)
+		}
+	}
+}
+```
+(`fakeDispatcher` also needs `onPlace func()` called at the top of `Place`.)
+
+- [ ] **Step 2: Run to verify failure** — `nice go test ./internal/dispatcher/ ./internal/api/ -run 'Displace|LastWins|BadBody|Reapplied' -v 2>&1 | tail -20` → FAIL (`MarkDirectDisplacing`, `Moved` undefined).
+
+- [ ] **Step 3: Implement.** `internal/dispatcher/place.go`:
+
+```go
+package dispatcher
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/seefood/blinkenkeys/internal/keyaddr"
+)
+
+// Moved reports what a direct write did to a named claim sitting on its key.
+// The zero value means no claim was there.
+type Moved struct {
+	Name     string
+	From, To uint16
+	Dropped  bool // no free pool key, so the claim was released instead of moved
+}
+
+// MarkDirectDisplacing is MarkDirect with the device's collision policy: if
+// idx holds a named claim and the layout has Displace, the claim moves to the
+// next unclaimed pool key and idx becomes direct-owned. With no free key (or
+// with last-wins) the claim is released, as MarkDirect does.
+func (r *Registry) MarkDirectDisplacing(device string, idx uint16) Moved {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	s, ok := r.slots[device]
+	if !ok {
+		return Moved{}
+	}
+	owner, held := s.owners[idx]
+	if !held || owner.Name == "" {
+		markDirectLocked(s, idx)
+		return Moved{}
+	}
+	l := r.layoutLocked(device)
+	if l.Displace {
+		if to, ok := nextUnclaimedLocked(s, l); ok {
+			c := s.claims[owner.Name]
+			c.index = to
+			s.claims[owner.Name] = c
+			s.owners[to] = keyOwner{Name: owner.Name}
+			s.owners[idx] = keyOwner{Direct: true}
+			return Moved{Name: owner.Name, From: idx, To: to}
+		}
+	}
+	markDirectLocked(s, idx)
+	return Moved{Name: owner.Name, From: idx, Dropped: true}
+}
+
+// Place is Canonical with the collision policy applied: identical for a name
+// or an unclaimed/direct key; for a direct address onto a named claim it calls
+// MarkDirectDisplacing and returns the Moved only if the claim moved. The
+// caller must re-apply the displaced key's last request on Moved.To (the
+// dispatcher cannot: effects live in effects.Engine).
+func (d *Dispatcher) Place(ctx context.Context, device string, addr keyaddr.Address) (keyaddr.Address, *Moved, error) {
+	if addr.Kind == keyaddr.Name {
+		a, err := d.Canonical(ctx, device, addr)
+		return a, nil, err
+	}
+	caps, err := d.GetCapabilities(ctx, device)
+	if err != nil {
+		return keyaddr.Address{}, nil, err
+	}
+	idx, ok := keyaddr.Resolve(addr, caps.LEDCount, caps.Positions)
+	if !ok {
+		return keyaddr.Address{}, nil, fmt.Errorf("%w: %s", ErrKeyNotFound, addr)
+	}
+	m := d.registry.MarkDirectDisplacing(device, idx)
+	led := keyaddr.Address{Kind: keyaddr.LED, N: idx}
+	switch {
+	case m.Name == "":
+		return led, nil, nil
+	case m.Dropped:
+		if d.registry.Layout(device).Displace {
+			d.logger.Warn("displace: pool full, named claim released", "device", device, "name", m.Name, "led", idx)
+		}
+		return led, nil, nil
+	}
+	d.logger.Info("displace: named claim moved", "device", device, "name", m.Name, "from", m.From, "to", m.To)
+	return led, &m, nil
+}
+```
+`internal/api/handlers.go`: add `Place(ctx context.Context, device string, addr keyaddr.Address) (keyaddr.Address, *dispatcher.Moved, error)` to the `Dispatcher` interface, and replace `writeKey`'s body from the address parse onward:
+
+```go
+	// The body is validated first: a bad request must not displace anything.
+	body, err := decodeWriteBody(r.Body)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	addr, moved, err := h.disp.Place(r.Context(), device, addr)
+	if err != nil {
+		writeError(w, statusFor(err), err)
+		return
+	}
+	now := time.Now()
+	target := effects.Target{Device: device, Addr: addr}
+	// Capture the displaced key's last request before the incoming write
+	// replaces its status record.
+	var carry *writeBody
+	if moved != nil {
+		if st, ok := h.w.Status(target, now); ok {
+			if b, ok := bodyOf(st.Origin); ok {
+				carry = &b
+			}
+		}
+	}
+	if err := h.apply(target, body, now); err != nil {
+		writeError(w, statusFor(err), err)
+		return
+	}
+	if carry != nil {
+		to := effects.Target{Device: device, Addr: keyaddr.Address{Kind: keyaddr.LED, N: moved.To}}
+		// Best effort: the incoming write already succeeded; a failure to
+		// restore the displaced key must not fail it.
+		if err := h.apply(to, *carry, now); err != nil && h.logger != nil {
+			h.logger.Warn("displace: re-apply failed", "device", device, "name", moved.Name, "err", err)
+		}
+	}
+	w.WriteHeader(http.StatusNoContent)
+```
+and
+
+```go
+// bodyOf rebuilds the request that produced o, so a displaced key's color,
+// effect or state can be replayed on its new key. ok is false for an origin
+// with no replayable source.
+func bodyOf(o effects.Origin) (writeBody, bool) {
+	var b writeBody
+	switch o.Type {
+	case "color":
+		b.Color = &o.Ref
+	case "effect":
+		b.Effect = &o.Ref
+	case "state":
+		b.State = &o.Ref
+	default:
+		return writeBody{}, false
+	}
+	if o.Owner != "" {
+		b.Owner = &o.Owner
+	}
+	return b, true
+}
+```
+
+- [ ] **Step 4: Run** — `nice go test ./internal/dispatcher/ ./internal/api/ -v 2>&1 | tail -30` → PASS. Also `nice go vet ./...`.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add internal/dispatcher internal/api
+git commit -m "Collision policy: displace moves a named claim to the next pool key"
+```
+
+---
+
 ### Task 7: Daemon wiring, example config, daemon docs, manual check
 
 **Files:**
@@ -1841,6 +2208,13 @@ func TestLayoutFor(t *testing.T) {
 	if l.DefaultPool || len(l.Pool) != 0 {
 		t.Errorf("explicit empty pool must not be DefaultPool: %+v", l)
 	}
+	l, _ = layoutFor(config.DeviceDecl{ID: "a", Keys: &config.KeyLayout{Collision: "displace"}})
+	if !l.Displace {
+		t.Errorf("collision: displace must set Displace: %+v", l)
+	}
+	if l, _ = layoutFor(config.DeviceDecl{ID: "a", Keys: &config.KeyLayout{Tabs: config.KeyList{0}}}); l.Displace {
+		t.Error("collision omitted must not displace")
+	}
 	_ = dispatcher.Layout{} // keep the import honest if the file didn't already use it
 }
 ```
@@ -1857,7 +2231,7 @@ func layoutFor(d config.DeviceDecl) (dispatcher.Layout, bool) {
 	if d.Keys == nil {
 		return dispatcher.Layout{}, false
 	}
-	return dispatcher.Layout{Tabs: d.Keys.Tabs, Pool: d.Keys.Pool, DefaultPool: d.Keys.Pool == nil}, true
+	return dispatcher.Layout{Tabs: d.Keys.Tabs, Pool: d.Keys.Pool, DefaultPool: d.Keys.Pool == nil, Displace: d.Keys.Collision == "displace"}, true
 }
 ```
 Change the declare loop to:
@@ -1880,8 +2254,9 @@ Docs:
     # keys:                 # optional per-device key roles, by idx (reading-order) index
     #   tabs: [0-5]         # blincli maps terminal tab N -> tabs[(N-1) mod len]
     #   pool: [6-11]        # named claims are auto-assigned from here; [] = none
+    #   collision: last-wins   # or displace: a direct write pushes a named claim to the next free pool key
 ```
-- `examples/config/README.md`: in the `config.yaml` schema block add the same three `keys:` lines under `devices:` with these comment lines: `# tabs: tab-number slots, in order; list items are idx numbers or ranges, e.g. [0-4, 6, 8-10] or "0-4,6"`, `# pool: keys named claims may be auto-assigned from; omitted = every row>=1 key not in tabs; [] = no pool`, `# keys in neither list are never touched`. Replace the last paragraph of "Addressing a key" (`DELETE ... only works on a key name`) with:
+- `examples/config/README.md`: in the `config.yaml` schema block add the same four `keys:` lines under `devices:` with these comment lines: `# tabs: tab-number slots, in order; list items are idx numbers or ranges, e.g. [0-4, 6, 8-10] or "0-4,6"`, `# pool: keys named claims may be auto-assigned from; omitted = every row>=1 key not in tabs; [] = no pool`, `# collision: last-wins (default) — a direct write releases a named claim on its key; displace — the claim moves to the next unclaimed pool key (effects restart there; a full pool falls back to last-wins)`, `# keys in neither list are never touched`. Replace the last paragraph of "Addressing a key" (`DELETE ... only works on a key name`) with:
 ```markdown
 `DELETE /devices/{name}/keys/{pos}` blanks the key (cancelling any running effect)
 and, if `{pos}` is a **name**, releases its claim. Any `{pos}` form is accepted.
@@ -1922,6 +2297,8 @@ Set `S=$HOME/.local/state/blinkenkeys/api.sock` and `D=<device name>`.
 5. `curl -s --unix-socket $S -X DELETE "http://localhost/devices/$D/keys/idx:0?owner=someone-else" -w '%{http_code}\n'` → 204 and key 0 **stays lit**.
 6. Same with `?owner=manual` → 204 and the key goes dark; `GET` of it → 404-or-blank-state per the engine record being dropped (it is dropped: 404 only if also not direct-owned; direct ownership persists, so expect 200 with no `source`).
 7. `curl ... -X PUT .../keys/named1 -d '{"color":"red"}'` → lands on idx 6+ (pool), not 0–5.
+8. Collision, `last-wins` (default): `PUT .../keys/idx:6 -d '{"color":"blue"}'` → key 6 turns blue; `GET .../keys/named1` → 404 (claim released); a new name claims idx 7.
+9. Collision, `displace`: add `collision: displace` under `keys:`, restart, `PUT .../keys/named1 {"color":"red"}` (lands on idx 6), then `PUT .../keys/idx:6 {"color":"blue"}` → key 6 blue, `GET .../keys/named1` → `idx` 7 and key 7 red (a running effect restarts there). Fill the pool (6–11) first and repeat: key blue, `named1` gone, daemon log has a `displace: pool full` warning.
 ````
 
 - [ ] **Step 4: Run** — `nice make test && nice go run ./cmd/blinkenkeysd --check-config -c examples/config` → tests PASS; `ok`.
@@ -5126,6 +5503,7 @@ Validate: `python3 -c 'import json,sys; json.load(open("integrations/claude/hook
   - `integrations/claude/README.md`: change the intro "these are the first two" to "three"; in Prerequisites add step "Install `blincli` (`make build`, then `packaging/<os>/install.sh`) and run `blincli config init` if the daemon is remote; for a local daemon nothing is needed." and add a section **`hooks-blincli.json`** describing: no device name or socket path in the commands (found by `blincli`), key = terminal tab slot (tabs 1–N of iTerm/tmux/WezTerm map onto the device's `keys.tabs`, configure it per `examples/config/README.md`), fallback to a named claim from the terminal pane id / `$CLAUDE_CODE_SESSION_ID`, shared slot when the pool is empty, `blincli clear` only blanks a key you still own, the iTerm env var staleness limitation (tab reorder/close), and `blincli detect` for debugging. Relabel the `hooks-wezterm-pane.json` section's first sentence to: "A raw-`curl` example, kept for reference; `hooks-blincli.json` supersedes it."
   - `README.md`: add a short "## blincli" section after Installation: what it is, `blincli set -s claude/idle`, `blincli get`, link to `integrations/claude/README.md` and the spec.
   - `CHANGELOG.md`: append `## blincli design (docs/superpowers/specs/2026-10-05-blincli-design.md)` with a dated entry listing: `GET` key/keys endpoints, `owner` tag + conditional `DELETE` (and `DELETE` now accepts direct addresses — previously 400), per-device `keys:` layout in `config.yaml`, engine status records (in-memory).
+  - `README.md`/`integrations/claude/README.md`: mention the per-device `keys.collision` setting (`last-wins` default, `displace`) in one short paragraph next to the layout description.
   - `CLAUDE.md`: in **Commands** add `bin/blincli` to the `make build` line comment (`# builds bin/blinkenkeysd and bin/blincli`); add one bullet to **Architecture essentials**: "**`blincli` is a pure-Go client** (`cmd/blincli`, `internal/client`, `internal/termid`): it must never import `internal/hid`/`dispatcher`/`effects`/`api` (cgo). Exit codes are sysexits and never 2 (Claude Code hooks treat 2 as blocking)."
   - Spec `docs/superpowers/specs/2026-10-05-blincli-design.md`: in **Files** change the `hooks-blincli.json` line to say it uses plain `blincli set -s claude/…` and `blincli clear` (no `--if-detected`, for the reason in Step 2); in the terminal table replace the unverified markers with the results in this plan's "Verified ground truth" (iTerm zero-based/stale; WezTerm JSON shape verified, tab ordering unverified; tmux verified; hook exit 2 verified).
 
@@ -5177,10 +5555,11 @@ git commit -m "blincli: installers, hooks example, docs and manual checks"
 - Collision policy (owner tag, conditional `clear`, `--force`) → Tasks 5, 12.
 - `get`/status API (engine records, `Timeline.Name`, `GET` key/keys, no-claim lookup, `PUT owner`, `DELETE` direct + `?owner=`) → Tasks 3–6.
 - Per-device layout (`tabs`/`pool`, list/range syntax, default-pool rules, `pool: []`, validation, capabilities `layout`) → Tasks 1, 2, 6, 7. The spec's "idx beyond the device's key count rejected once capabilities are known" is **not** implemented as a hard validation: out-of-range pool entries are skipped at claim time (Task 2 test) and an out-of-range tab slot write returns 404 from `Canonical`; Task 15's manual check step 1 covers eyeballing it. This is the one deliberate deviation — rejecting at config-load time is impossible (capabilities unknown then), and adding a later check would be a new startup phase; flagged here rather than silently dropped. Update the spec's validation bullet accordingly in Task 15 Step 3.
+- Collision policy (`keys.collision: last-wins | displace`, default `last-wins`; `displace` moves the named claim to the next unclaimed pool key, replays its last request, falls back to last-wins with a warning when the pool is full) → Tasks 1, 2, 6b, 7 (config, `Layout.Displace`, `Place`/`MarkDirectDisplacing`, wiring). `applyPending` (writes queued before capabilities are known) always uses last-wins: it runs under the registry lock without engine access, so it cannot replay a request; this is the one place `displace` does not apply.
 - Exit codes → Tasks 11, 12 tests; installers + `make build` + hooks example + docs → Task 15.
 
 **2. Placeholder scan:** no TBD/TODO. Several steps contain parenthetical *cleanup notes* about lines to delete (trailing `var _ = …` guards, unused imports); these are instructions to the implementer about code shown, not missing content.
 
-**3. Type consistency:** `effects.Origin`/`Status`/`EffectStatus`, `Writer` methods (`SetColor`, `SetColorFrom(t,c,o,now)`, `StartFrom(t,tl,now,o)`, `Status`, `Statuses`) consistent across Tasks 4–6; `dispatcher.KeyInfo`/`Layout`/`Lookup` consistent across 2, 3, 5, 6, 7; client `PutBody`, `KeyStatus`, `Capabilities.Layout.Tabs`, `Plan`/`PlanKey`/`Qualify`/`SlotKey`/`SharedKey`/`DefaultTabs` consistent across 10, 12, 13; `app.prepare`/`prepared`/`tabs`/`keyFlags` consistent across 12–13. Known fix-ups called out inline: `addKeyFlags` loses its unused `a` parameter, `a.fail(nil)` returns 0, `--if-detected` registered with `fs.BoolVar` (no empty short name), `probeDevice` drops its `g` parameter.
+**3. Type consistency:** `effects.Origin`/`Status`/`EffectStatus`, `Writer` methods (`SetColor`, `SetColorFrom(t,c,o,now)`, `StartFrom(t,tl,now,o)`, `Status`, `Statuses`) consistent across Tasks 4–6; `dispatcher.KeyInfo`/`Layout`(`Displace`)/`Lookup`/`Moved`/`Place` consistent across 2, 3, 5, 6, 6b, 7; client `PutBody`, `KeyStatus`, `Capabilities.Layout.Tabs`, `Plan`/`PlanKey`/`Qualify`/`SlotKey`/`SharedKey`/`DefaultTabs` consistent across 10, 12, 13; `app.prepare`/`prepared`/`tabs`/`keyFlags` consistent across 12–13. Known fix-ups called out inline: `addKeyFlags` loses its unused `a` parameter, `a.fail(nil)` returns 0, `--if-detected` registered with `fs.BoolVar` (no empty short name), `probeDevice` drops its `g` parameter.
 
-**4. Review Focus coverage:** (1) Task 1 `TestLoadKeyLayout`; (2) Tasks 3 `TestLookupNameDoesNotClaim` + 6 `TestGetKeyRegistration`; (3) Tasks 5 `TestDeleteOwnerMismatchIsNoOp` + 12 `TestClearConditionalOnOwner`; (4) Task 8 `TestDetectHangingHelperIsBounded`, `TestDetectWezTermBadOutputDegrades`, `TestDetectTmuxHelperFailureKeepsInstance`; (5) Tasks 9 `TestResolveTokenFileAndMissingToken`, 12 `TestSetRemoteWithoutTokenFailsBeforeSending`, 14 `TestConfigShowMasksToken` + `TestVerboseNeverPrintsToken`; (6) Task 11 `TestNeverExitsTwo`/`TestUsageErrorsExit64`.
+**4. Review Focus coverage:** (1) Task 1 `TestLoadKeyLayout`; (2) Tasks 3 `TestLookupNameDoesNotClaim` + 6 `TestGetKeyRegistration`; (3) Tasks 5 `TestDeleteOwnerMismatchIsNoOp` + 12 `TestClearConditionalOnOwner`; (4) Task 8 `TestDetectHangingHelperIsBounded`, `TestDetectWezTermBadOutputDegrades`, `TestDetectTmuxHelperFailureKeepsInstance`; (5) Tasks 9 `TestResolveTokenFileAndMissingToken`, 12 `TestSetRemoteWithoutTokenFailsBeforeSending`, 14 `TestConfigShowMasksToken` + `TestVerboseNeverPrintsToken`; (6) Task 11 `TestNeverExitsTwo`/`TestUsageErrorsExit64`; (7) Task 6b `TestDisplaceWithFullPoolDropsTheClaim`, `TestPutBadBodyDisplacesNothing`.
