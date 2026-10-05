@@ -243,6 +243,13 @@ func TestDetectHonorsQuietAndVerbose(t *testing.T) {
 	}
 }
 
+func TestDetectWithEnvKeyShowsTerminalAndKey(t *testing.T) {
+	a, out, _ := testApp(map[string]string{"KITTY_WINDOW_ID": "4", "BLINKENKEYS_KEY": "idx:2", "BLINKENKEYS_SOCKET": "/x.sock"})
+	if code := a.run([]string{"detect"}); code != 0 || !strings.Contains(out.String(), "kitty") || !strings.Contains(out.String(), "idx:2") {
+		t.Errorf("code %d:\n%s", code, out)
+	}
+}
+
 func TestDetectWithNothingStillReports(t *testing.T) {
 	a, out, _ := testApp(map[string]string{"BLINKENKEYS_SOCKET": "/x.sock"})
 	if code := a.run([]string{"detect"}); code != 0 || !strings.Contains(out.String(), "none") {

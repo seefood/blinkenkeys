@@ -79,6 +79,9 @@ func (a *app) cmdGet(args []string) int {
 	if err != nil {
 		return a.fail(err)
 	}
+	if slots == 0 {
+		slots = fc.Slots // same fallback as set/clear (prepare)
+	}
 	ks, err := a.lookupKey(ctx, cl, device, plan, slots)
 	if err != nil {
 		return a.fail(err)

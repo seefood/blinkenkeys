@@ -187,6 +187,10 @@ func (a *app) planKey(ctx context.Context, key, name string) (client.Plan, termi
 	if key == "" {
 		key = a.getenv("BLINKENKEYS_KEY")
 	}
+	if key != "" { // an explicit key needs no terminal helpers
+		plan, err := client.PlanKey(client.KeyInput{Key: key})
+		return plan, termid.Identity{}, err
+	}
 	id := termid.Detect(ctx, a.termEnv)
 	fallback, _ := termid.FallbackName(a.getenv)
 	plan, err := client.PlanKey(client.KeyInput{Key: key, Name: name, ID: id, Fallback: fallback})
@@ -205,6 +209,9 @@ func (a *app) cmdDetect(args []string) int {
 		w = io.Discard
 	}
 	plan, id, perr := a.planKey(ctx, "", "")
+	if perr == nil && plan.Mode == client.ModeExplicit { // planKey skipped detection
+		id = termid.Detect(ctx, a.termEnv)
+	}
 	if _, src := termid.FallbackName(a.getenv); src != "" {
 		a.vlog(g, "fallback name source $%s (used only without a terminal instance id)", src)
 	}
@@ -220,6 +227,8 @@ func (a *app) cmdDetect(args []string) int {
 	switch {
 	case perr != nil:
 		_, _ = fmt.Fprintf(w, "key        none (%v)\n", perr)
+	case plan.Mode == client.ModeExplicit:
+		_, _ = fmt.Fprintf(w, "key        %s (from $BLINKENKEYS_KEY)\n", plan.Key)
 	case plan.Mode == client.ModeSlot:
 		_, _ = fmt.Fprintf(w, "key        tab %d -> a tab slot (owner %s)\n", plan.Tab, plan.Owner)
 	default:
