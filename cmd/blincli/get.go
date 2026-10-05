@@ -11,9 +11,6 @@ import (
 	"github.com/seefood/blinkenkeys/internal/client"
 )
 
-// defaultSlots is the tab-slot count used when the device has no layout.tabs.
-const defaultSlots = 6
-
 // Registered here (not in the main.go literal) so this file is self-contained.
 func init() {
 	commands["get"] = (*app).cmdGet
@@ -27,27 +24,6 @@ func (a *app) printJSON(v any) error {
 	}
 	_, err = fmt.Fprintln(a.stdout, string(b))
 	return err
-}
-
-// slotTabs returns the tab-slot table: the device's layout.tabs (or idx
-// 0-5 when none), truncated to slots when slots > 0. Never empty.
-func slotTabs(ctx context.Context, cl *client.Client, device string, slots int) ([]uint16, error) {
-	caps, err := cl.Capabilities(ctx, device)
-	if err != nil {
-		return nil, err
-	}
-	tabs := caps.Layout.Tabs
-	if len(tabs) == 0 {
-		n := defaultSlots
-		if slots > 0 {
-			n = slots
-		}
-		return client.DefaultTabs(n), nil
-	}
-	if slots > 0 && slots < len(tabs) {
-		tabs = tabs[:slots]
-	}
-	return tabs, nil
 }
 
 // cmdGet is read-only: it only issues GETs and never claims or creates a key.
@@ -86,7 +62,7 @@ func (a *app) cmdGet(args []string) int {
 		switch {
 		case g.Quiet:
 		case asJSON:
-			return a.failIf(a.printJSON(keys))
+			return a.fail(a.printJSON(keys))
 		default:
 			renderKeyTable(a.stdout, keys)
 		}
@@ -101,36 +77,28 @@ func (a *app) cmdGet(args []string) int {
 	if err != nil {
 		return a.fail(err)
 	}
-	ks, err := lookupKey(ctx, cl, device, plan, slots)
+	ks, err := a.lookupKey(ctx, cl, device, plan, slots)
 	if err != nil {
 		return a.fail(err)
 	}
 	switch {
 	case g.Quiet:
 	case asJSON:
-		return a.failIf(a.printJSON(ks))
+		return a.fail(a.printJSON(ks))
 	default:
 		renderKey(a.stdout, ks, time.Now())
 	}
 	return exitOK
 }
 
-// failIf is fail for an error that may be nil.
-func (a *app) failIf(err error) int {
-	if err == nil {
-		return exitOK
-	}
-	return a.fail(err)
-}
-
 // lookupKey reads plan's key; a named plan that isn't registered also tries
 // its shared slot (where a write lands when the pool is empty or full).
-func lookupKey(ctx context.Context, cl *client.Client, device string, plan client.Plan, slots int) (client.KeyStatus, error) {
+func (a *app) lookupKey(ctx context.Context, cl *client.Client, device string, plan client.Plan, slots int) (client.KeyStatus, error) {
 	switch plan.Mode {
 	case client.ModeExplicit:
 		return cl.GetKey(ctx, device, plan.Key)
 	case client.ModeSlot:
-		tabs, err := slotTabs(ctx, cl, device, slots)
+		tabs, err := a.tabs(ctx, cl, device, slots)
 		if err != nil {
 			return client.KeyStatus{}, err
 		}
@@ -140,7 +108,7 @@ func lookupKey(ctx context.Context, cl *client.Client, device string, plan clien
 		if err == nil || !client.IsNotFound(err) {
 			return ks, err
 		}
-		tabs, terr := slotTabs(ctx, cl, device, slots)
+		tabs, terr := a.tabs(ctx, cl, device, slots)
 		if terr != nil {
 			return client.KeyStatus{}, terr
 		}
@@ -169,7 +137,7 @@ func (a *app) cmdDevices(args []string) int {
 		switch {
 		case g.Quiet:
 		case asJSON:
-			return a.failIf(a.printJSON(devs))
+			return a.fail(a.printJSON(devs))
 		default:
 			for _, d := range devs {
 				state := "connected"
@@ -188,7 +156,7 @@ func (a *app) cmdDevices(args []string) int {
 	switch {
 	case g.Quiet:
 	case asJSON:
-		return a.failIf(a.printJSON(caps))
+		return a.fail(a.printJSON(caps))
 	default:
 		renderCaps(a.stdout, fs.Arg(0), caps)
 	}
