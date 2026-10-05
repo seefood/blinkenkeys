@@ -2,6 +2,7 @@ package config
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/goccy/go-yaml"
@@ -82,6 +83,20 @@ func TestKeyListRejects(t *testing.T) {
 		}
 		if err := yaml.Unmarshal([]byte(src), &got); err == nil {
 			t.Errorf("%s: want error, got %#v", src, got.K)
+		}
+	}
+}
+
+// Load already prefixes "config: "; a key-list error must not add a second one.
+func TestLoadKeyListErrorPrefixedOnce(t *testing.T) {
+	for _, body := range []string{`tabs: "5-2"`, "tabs: [a]", "tabs: [70000]", "tabs: {a: 1}"} {
+		_, err := Load(writeConfig(t, "devices:\n  - id: a\n    keys:\n      "+body+"\n"))
+		if err == nil {
+			t.Errorf("%q: want error", body)
+			continue
+		}
+		if n := strings.Count(err.Error(), "config:"); n != 1 {
+			t.Errorf("%q: %q has %d \"config:\" prefixes, want 1", body, err, n)
 		}
 	}
 }

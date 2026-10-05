@@ -46,21 +46,21 @@ func parseKeyList(raw any) (KeyList, error) {
 				out = append(out, part...)
 			case uint64:
 				if e > 0xFFFF {
-					return nil, fmt.Errorf("config: key index %d out of range", e)
+					return nil, fmt.Errorf("key index %d out of range", e)
 				}
 				out = append(out, uint16(e))
 			case int64:
 				if e < 0 || e > 0xFFFF {
-					return nil, fmt.Errorf("config: key index %d out of range", e)
+					return nil, fmt.Errorf("key index %d out of range", e)
 				}
 				out = append(out, uint16(e))
 			default:
-				return nil, fmt.Errorf("config: key list element %v (%T): want an index or a range like 0-4", el, el)
+				return nil, fmt.Errorf("key list element %v (%T): want an index or a range like 0-4", el, el)
 			}
 		}
 		return out, nil
 	default:
-		return nil, fmt.Errorf("config: key list must be a list or a string like \"0-4,6\", got %T", raw)
+		return nil, fmt.Errorf("key list must be a list or a string like \"0-4,6\", got %T", raw)
 	}
 }
 
@@ -73,15 +73,15 @@ func parseKeyString(s string) (KeyList, error) {
 		lo, hi, isRange := strings.Cut(strings.TrimSpace(part), "-")
 		a, err := strconv.ParseUint(strings.TrimSpace(lo), 10, 16)
 		if err != nil {
-			return nil, fmt.Errorf("config: key list %q: bad index %q", s, lo)
+			return nil, fmt.Errorf("key list %q: bad index %q", s, lo)
 		}
 		b := a
 		if isRange {
 			if b, err = strconv.ParseUint(strings.TrimSpace(hi), 10, 16); err != nil {
-				return nil, fmt.Errorf("config: key list %q: bad index %q", s, hi)
+				return nil, fmt.Errorf("key list %q: bad index %q", s, hi)
 			}
 			if b < a {
-				return nil, fmt.Errorf("config: key list %q: range %d-%d runs backwards", s, a, b)
+				return nil, fmt.Errorf("key list %q: range %d-%d runs backwards", s, a, b)
 			}
 		}
 		for n := a; n <= b; n++ {
