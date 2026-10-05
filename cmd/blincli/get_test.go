@@ -1,8 +1,11 @@
 package main
 
 import (
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -102,6 +105,54 @@ func TestGetNamedFallsBackToSharedSlot(t *testing.T) {
 	}
 	if len(gets) != 2 || !strings.Contains(gets[0], "claude-sess1") || !strings.Contains(gets[1], "/keys/idx:") {
 		t.Errorf("GETs = %v", gets)
+	}
+}
+
+// unixServer serves h on a Unix socket in a short temp dir (sun_path is ~104 bytes).
+func unixServer(t *testing.T, h http.Handler) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "bk")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	sock := filepath.Join(dir, "api.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &httptest.Server{Listener: ln, Config: &http.Server{Handler: h}}
+	srv.Start()
+	t.Cleanup(srv.Close)
+	return sock
+}
+
+// get must look up the same name set claimed: unqualified on a local
+// socket, host-qualified on a remote endpoint.
+func TestGetNamedMatchesSetOverLocalSocket(t *testing.T) {
+	env := map[string]string{"CLAUDE_CODE_SESSION_ID": "sess1"}
+	sf := &setFakeDaemon{}
+	env["BLINKENKEYS_SOCKET"] = unixServer(t, sf)
+	a, _, errb := testApp(env)
+	if code := a.run([]string{"set", "-c", "red"}); code != 0 {
+		t.Fatalf("set: code %d: %s", code, errb)
+	}
+	w := sf.writes()
+	if len(w) != 1 || strings.Contains(w[0].Path, "testhost") {
+		t.Fatalf("set writes = %+v", w)
+	}
+	gf := &getFake{tabs: "[0,1,2,3,4,5]", keys: map[string]string{w[0].Path: keyJSON}}
+	env["BLINKENKEYS_SOCKET"] = unixServer(t, gf)
+	a, out, errb := testApp(env)
+	if code := a.run([]string{"get"}); code != 0 || !strings.Contains(out.String(), "idx:1") {
+		t.Errorf("get after set (%s): code %d, stdout %q, stderr %q, calls %v", w[0].Path, code, out, errb, gf.calls)
+	}
+
+	rf := &getFake{tabs: "[0,1,2,3,4,5]"}
+	b := getApp(t, rf, map[string]string{"CLAUDE_CODE_SESSION_ID": "sess1"})
+	b.run([]string{"get"})
+	if len(rf.calls) < 2 || rf.calls[1].Path != "/devices/d/keys/testhost.claude-sess1" {
+		t.Errorf("remote get must host-qualify; calls %v", rf.calls)
 	}
 }
 

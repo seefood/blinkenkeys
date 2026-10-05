@@ -46,7 +46,7 @@ func (a *app) cmdGet(args []string) int {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
 	defer cancel()
-	cl, _, fc, err := a.session(g)
+	cl, ep, fc, err := a.session(g)
 	if err != nil {
 		return a.fail(err)
 	}
@@ -72,7 +72,9 @@ func (a *app) cmdGet(args []string) int {
 	if err != nil {
 		return a.fail(err)
 	}
-	plan = plan.Qualify(a.host)
+	if ep.Remote() { // same rule as set/clear (prepare)
+		plan = plan.Qualify(a.host)
+	}
 	device, err := a.device(ctx, g, fc, cl)
 	if err != nil {
 		return a.fail(err)
