@@ -29,7 +29,23 @@ type fakeDispatcher struct {
 	released   []string // device+"/"+name for each ReleaseClaim call
 	lookupErr  error
 	lookupAddr *keyaddr.Address // if set, Lookup returns this instead of echoing the address
+
+	info         dispatcher.KeyInfo
+	curColor     *color.HSV
+	layout       dispatcher.Layout
+	disconnected bool
+	canonCalls   int // Canonical claims/marks as a side effect; read paths must leave this 0
 }
+
+func (f *fakeDispatcher) KeyInfo(string, uint16) dispatcher.KeyInfo { return f.info }
+func (f *fakeDispatcher) CurrentColor(string, uint16) (color.HSV, bool) {
+	if f.curColor == nil {
+		return color.HSV{}, false
+	}
+	return *f.curColor, true
+}
+func (f *fakeDispatcher) Layout(string) dispatcher.Layout { return f.layout }
+func (f *fakeDispatcher) Connected(string) bool          { return !f.disconnected }
 
 func (f *fakeDispatcher) ResolveDevice(ref string) (string, bool) {
 	name, ok := f.devices[ref]
@@ -37,6 +53,7 @@ func (f *fakeDispatcher) ResolveDevice(ref string) (string, bool) {
 }
 
 func (f *fakeDispatcher) Canonical(_ context.Context, _ string, a keyaddr.Address) (keyaddr.Address, error) {
+	f.canonCalls++
 	if f.canonErr != nil {
 		return keyaddr.Address{}, f.canonErr
 	}
@@ -95,6 +112,16 @@ func (f *fakeWriter) StartFrom(t effects.Target, tl *effects.Timeline, _ time.Ti
 func (f *fakeWriter) Status(t effects.Target, _ time.Time) (effects.Status, bool) {
 	st, ok := f.status[t]
 	return st, ok
+}
+
+func (f *fakeWriter) Statuses(device string, _ time.Time) map[effects.Target]effects.Status {
+	out := map[effects.Target]effects.Status{}
+	for t, st := range f.status {
+		if t.Device == device {
+			out[t] = st
+		}
+	}
+	return out
 }
 
 type fakeLibrary struct {

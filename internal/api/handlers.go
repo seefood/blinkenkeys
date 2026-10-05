@@ -27,6 +27,10 @@ type Dispatcher interface {
 	GetCapabilities(ctx context.Context, device string) (dispatcher.Capabilities, error)
 	ReleaseClaim(device, name string) error
 	Lookup(ctx context.Context, device string, addr keyaddr.Address) (keyaddr.Address, error)
+	KeyInfo(device string, led uint16) dispatcher.KeyInfo
+	CurrentColor(device string, led uint16) (color.HSV, bool)
+	Layout(device string) dispatcher.Layout
+	Connected(device string) bool
 }
 
 // Writer is the effects engine: the only write path, so supersession is
@@ -36,6 +40,7 @@ type Writer interface {
 	SetColorFrom(t effects.Target, c color.HSV, o effects.Origin, now time.Time) error
 	StartFrom(t effects.Target, tl *effects.Timeline, now time.Time, o effects.Origin) error
 	Status(t effects.Target, now time.Time) (effects.Status, bool)
+	Statuses(device string, now time.Time) map[effects.Target]effects.Status
 }
 
 // Library resolves effect and template-state requests. *effects.Library
@@ -51,13 +56,19 @@ type Handler struct {
 	w      Writer
 	lib    Library
 	logger *slog.Logger
+
+	claimIdle time.Duration
 }
 
 // NewHandler constructs a Handler. logger may be nil, in which case
 // best-effort warnings (e.g. a failed blank-on-release) are discarded.
 func NewHandler(disp Dispatcher, w Writer, lib Library, logger *slog.Logger) *Handler {
-	return &Handler{disp: disp, w: w, lib: lib, logger: logger}
+	return &Handler{disp: disp, w: w, lib: lib, logger: logger, claimIdle: dispatcher.DefaultClaimIdleTimeout}
 }
+
+// SetClaimIdleTimeout sets the claim idle timeout used to report a named
+// claim's expiry; it should match config's claims.idle_timeout.
+func (h *Handler) SetClaimIdleTimeout(d time.Duration) { h.claimIdle = d }
 
 // Routes builds blinkenkeysd's route table (Go 1.22+ ServeMux method+wildcard
 // patterns — no external router dependency needed).
@@ -65,6 +76,8 @@ func (h *Handler) Routes() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("PUT /devices/{name}/keys/{pos}", h.writeKey)
 	mux.HandleFunc("DELETE /devices/{name}/keys/{pos}", h.releaseKey)
+	mux.HandleFunc("GET /devices/{name}/keys", h.listKeys)
+	mux.HandleFunc("GET /devices/{name}/keys/{pos}", h.getKey)
 	mux.HandleFunc("GET /devices", h.listDevices)
 	mux.HandleFunc("GET /devices/{name}", h.getCapabilities)
 	return mux
@@ -267,5 +280,7 @@ func (h *Handler) getCapabilities(w http.ResponseWriter, r *http.Request) {
 		writeError(w, statusFor(err), err)
 		return
 	}
-	writeJSON(w, http.StatusOK, caps)
+	view := capsView{Capabilities: caps}
+	view.Layout.Tabs = h.disp.Layout(device).Tabs
+	writeJSON(w, http.StatusOK, view)
 }
