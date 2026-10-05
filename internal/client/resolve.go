@@ -53,7 +53,10 @@ func (e Endpoint) GoString() string { return e.String() }
 
 // redactURL masks userinfo passwords; an unparseable URL is not echoed at all,
 // because url.Parse errors quote the input.
-func redactURL(raw string) string {
+func redactURL(raw string) string { return RedactURL(raw) }
+
+// RedactURL is redactURL for callers outside the package (config show).
+func RedactURL(raw string) string {
 	u, err := url.Parse(raw)
 	if err != nil {
 		return "<unparseable url>"
