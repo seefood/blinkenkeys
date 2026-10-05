@@ -100,7 +100,7 @@ func exitCode(err error) int {
 	switch {
 	case err == nil:
 		return exitOK
-	case errors.Is(err, client.ErrNoEndpoint):
+	case errors.Is(err, client.ErrNoEndpoint), errors.Is(err, client.ErrBadConfig):
 		return exitConfig
 	case errors.Is(err, client.ErrUnreachable):
 		return exitUnavailable

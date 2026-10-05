@@ -16,6 +16,7 @@ import (
 // Sentinels the command layer maps to exit codes.
 var (
 	ErrNoEndpoint  = errors.New("no blinkenkeysd endpoint configured") // exit 78
+	ErrBadConfig   = errors.New("invalid blincli config")              // exit 78
 	ErrUnreachable = errors.New("blinkenkeysd unreachable")            // exit 69
 	ErrAuth        = errors.New("bearer token missing or rejected")    // exit 77
 	ErrUsage       = errors.New("usage error")                         // exit 64

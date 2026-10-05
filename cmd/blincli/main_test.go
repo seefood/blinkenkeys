@@ -41,6 +41,7 @@ func TestExitCodeMapping(t *testing.T) {
 		{nil, 0},
 		{fmt.Errorf("x: %w", client.ErrNoEndpoint), 78},
 		{&client.NoEndpointError{}, 78},
+		{fmt.Errorf("x: %w", client.ErrBadConfig), 78},
 		{fmt.Errorf("x: %w", client.ErrUnreachable), 69},
 		{fmt.Errorf("x: %w", client.ErrAuth), 77},
 		{&client.APIError{Status: 401}, 77},

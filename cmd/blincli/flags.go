@@ -88,6 +88,6 @@ Global options (accepted before or after the command):
   -h, --help
 
 Exit codes: 0 ok, 1 daemon error, 64 usage, 66 key not registered,
-69 daemon unreachable, 77 auth, 78 no config/endpoint.
+69 daemon unreachable, 77 auth, 78 no endpoint or invalid config.
 `)
 }

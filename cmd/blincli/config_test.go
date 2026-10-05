@@ -252,3 +252,30 @@ func TestConfigPath(t *testing.T) {
 		t.Errorf("path = %q", out)
 	}
 }
+
+func TestMalformedConfigExits78WithoutContent(t *testing.T) {
+	for _, body := range []string{
+		"token: SECRETTOKEN123\nurll: x\n",
+		"url: http://h:1\ntoken: SECRETTOKEN123\nslots: x\n",
+		"token: SECRETTOKEN123\nurl: [unterminated\n",
+	} {
+		for _, args := range [][]string{{"config", "show"}, {"set", "-k", "idx:0", "-c", "red"}, {"get", "-k", "idx:0"}, {"clear", "-k", "idx:0"}, {"devices"}} {
+			a, path, out, errs := cfgApp(t, map[string]string{"BLINKENKEYS_SOCKET": "/nonexistent/api.sock"})
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if code := a.run(append([]string{"-C", path}, args...)); code != exitConfig {
+				t.Errorf("%v on %q: code %d, want 78; stderr %s", args, body, code, errs)
+			}
+			all := out.String() + errs.String()
+			for _, frag := range []string{"SECRETTOKEN123", "unterminated", "urll: x", "slots: x"} {
+				if strings.Contains(all, frag) {
+					t.Errorf("%v: output quotes file content %q:\n%s", args, frag, all)
+				}
+			}
+		}
+	}
+}
