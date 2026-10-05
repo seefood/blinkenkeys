@@ -67,6 +67,18 @@ func TestNeverExitsTwo(t *testing.T) {
 	}
 }
 
+func TestPanicExitsOneNotTwo(t *testing.T) {
+	commands["test-panic"] = func(*app, []string) int { panic("boom SECRET") }
+	t.Cleanup(func() { delete(commands, "test-panic") })
+	a, _, errb := testApp(nil)
+	if code := a.run([]string{"test-panic"}); code != exitFail {
+		t.Errorf("code %d, want 1", code)
+	}
+	if !strings.Contains(errb.String(), "internal error") || strings.Contains(errb.String(), "goroutine") {
+		t.Errorf("stderr %q: want a short message, no stack trace", errb)
+	}
+}
+
 func TestUsageErrorsExit64(t *testing.T) {
 	for _, args := range [][]string{{"--bogus"}, {"nosuchcommand"}, {}} {
 		a, _, errb := testApp(nil)

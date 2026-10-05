@@ -69,7 +69,15 @@ var commands = map[string]func(*app, []string) int{
 	"detect":  (*app).cmdDetect,
 }
 
-func (a *app) run(args []string) int {
+// run executes one invocation. A panic becomes exit 1 rather than the Go
+// runtime's exit 2, which Claude Code hooks would treat as blocking.
+func (a *app) run(args []string) (code int) {
+	defer func() {
+		if r := recover(); r != nil {
+			_, _ = fmt.Fprintf(a.stderr, "blincli: internal error: %v\n", r)
+			code = exitFail
+		}
+	}()
 	fs, g := a.newFlags("blincli")
 	if code, done := a.parse(fs, args); done {
 		return code
