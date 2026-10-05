@@ -45,7 +45,7 @@ func (f *fakeDispatcher) KeyInfo(string, uint16) dispatcher.KeyInfo {
 	f.infoCalls++
 	return f.info
 }
-func (f *fakeDispatcher) OwnedLEDs(string) []uint16                 { return f.owned }
+func (f *fakeDispatcher) OwnedLEDs(string) []uint16 { return f.owned }
 func (f *fakeDispatcher) CurrentColor(string, uint16) (color.HSV, bool) {
 	if f.curColor == nil {
 		return color.HSV{}, false
