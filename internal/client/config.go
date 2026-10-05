@@ -24,6 +24,18 @@ type FileConfig struct {
 	Slots     int    `yaml:"slots"`
 }
 
+// String renders the config with the token masked.
+func (fc FileConfig) String() string {
+	if fc.Token != "" {
+		fc.Token = "<redacted>"
+	}
+	return fmt.Sprintf("{URL:%s Socket:%s Token:%s TokenFile:%s Device:%s Slots:%d}",
+		fc.URL, fc.Socket, fc.Token, fc.TokenFile, fc.Device, fc.Slots)
+}
+
+// GoString makes %#v mask the token too (fmt ignores String for %#v).
+func (fc FileConfig) GoString() string { return fc.String() }
+
 // DefaultConfigPath is ${XDG_CONFIG_HOME:-~/.config}/blinkenkeys/blincli.yaml.
 func DefaultConfigPath(getenv func(string) string, home string) string {
 	base := getenv("XDG_CONFIG_HOME")

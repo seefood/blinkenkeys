@@ -2,6 +2,8 @@ package client
 
 import (
 	"errors"
+	"fmt"
+	"io/fs"
 	"net"
 	"os"
 	"path/filepath"
@@ -117,6 +119,37 @@ func TestResolveTokenPrecedenceAndNoLeak(t *testing.T) {
 	// Endpoint's default formatting must not print the token either
 	if s := (Endpoint{Kind: "http", BaseURL: "http://h:1", Token: "TOPSECRET"}).String(); strings.Contains(s, "TOPSECRET") {
 		t.Errorf("Endpoint.String leaks token: %s", s)
+	}
+}
+
+func TestRedactionAllVerbs(t *testing.T) {
+	const secret = "TOPSECRET"
+	ep := Endpoint{Kind: "http", BaseURL: "http://u:" + secret + "pw@h:1", Token: secret, Source: "x"}
+	fc := FileConfig{URL: "http://h:1", Token: secret, Device: "d"}
+	for _, v := range []any{ep, &ep, fc, &fc} {
+		for _, verb := range []string{"%v", "%+v", "%#v", "%s"} {
+			if s := fmt.Sprintf(verb, v); strings.Contains(s, secret) {
+				t.Errorf("%s of %T leaks secret: %s", verb, v, s)
+			}
+		}
+	}
+}
+
+func TestResolveErrorsRedactURLUserinfo(t *testing.T) {
+	r, _ := resolverFor(t, nil)
+	for _, raw := range []string{"http://user:PASSWORD@h:1", "ftp://user:PASSWORD@h:1", "http://user:PASSWORD@"} {
+		_, _, err := r.Resolve(Options{URL: raw})
+		if err == nil || strings.Contains(err.Error(), "PASSWORD") {
+			t.Errorf("%s: err = %v", raw, err)
+		}
+	}
+}
+
+func TestResolveTokenFileErrorKeepsCause(t *testing.T) {
+	r, home := resolverFor(t, nil)
+	_, _, err := r.Resolve(Options{URL: "http://h:1", TokenFile: filepath.Join(home, "missing")})
+	if !errors.Is(err, ErrAuth) || !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("err = %v, want ErrAuth and fs.ErrNotExist", err)
 	}
 }
 

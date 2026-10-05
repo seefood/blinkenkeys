@@ -38,13 +38,27 @@ type Endpoint struct {
 // Remote reports whether the endpoint is a network address (not the local socket).
 func (e Endpoint) Remote() bool { return e.Kind == "http" }
 
-// String renders the endpoint for -v/show output; the token is never included.
+// String renders the endpoint for -v/show output; the token and any URL
+// userinfo are never included.
 func (e Endpoint) String() string {
-	addr := e.BaseURL
+	addr := redactURL(e.BaseURL)
 	if e.Kind == "unix" {
 		addr = e.Socket
 	}
 	return fmt.Sprintf("%s %s (from %s)", e.Kind, addr, e.Source)
+}
+
+// GoString makes %#v redact as well (fmt ignores String for %#v).
+func (e Endpoint) GoString() string { return e.String() }
+
+// redactURL masks userinfo passwords; an unparseable URL is not echoed at all,
+// because url.Parse errors quote the input.
+func redactURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "<unparseable url>"
+	}
+	return u.Redacted()
 }
 
 // NoEndpointError carries what was looked at, so its message can say how to fix it.
@@ -113,14 +127,14 @@ func (r Resolver) Resolve(o Options) (Endpoint, FileConfig, error) {
 func (r Resolver) httpEndpoint(raw, src string, o Options, fc FileConfig) (Endpoint, error) {
 	u, err := url.Parse(raw)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		return Endpoint{}, fmt.Errorf("%w: %q is not an http(s) URL", ErrUsage, raw)
+		return Endpoint{}, fmt.Errorf("%w: %q is not an http(s) URL", ErrUsage, redactURL(raw))
 	}
 	tok, err := r.token(o, fc)
 	if err != nil {
 		return Endpoint{}, err
 	}
 	if tok == "" {
-		return Endpoint{}, fmt.Errorf("%w: a token is required for %s (use --token-file, $BLINKENKEYS_TOKEN, or token/token_file in the config)", ErrAuth, raw)
+		return Endpoint{}, fmt.Errorf("%w: a token is required for %s (use --token-file, $BLINKENKEYS_TOKEN, or token/token_file in the config)", ErrAuth, redactURL(raw))
 	}
 	return Endpoint{Kind: "http", BaseURL: strings.TrimRight(raw, "/"), Token: tok, Source: src}, nil
 }
@@ -147,7 +161,7 @@ func (r Resolver) token(o Options, fc FileConfig) (string, error) {
 func (r Resolver) readToken(path string) (string, error) {
 	b, err := os.ReadFile(ExpandHome(path, r.Home)) // #nosec G304 -- operator-supplied token file
 	if err != nil {
-		return "", fmt.Errorf("%w: reading token file: %v", ErrAuth, err)
+		return "", fmt.Errorf("%w: reading token file: %w", ErrAuth, err)
 	}
 	return strings.TrimSpace(string(b)), nil
 }
