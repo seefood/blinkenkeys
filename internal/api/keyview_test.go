@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"testing"
 	"time"
@@ -140,6 +141,29 @@ func TestListKeysSortedByLED(t *testing.T) {
 	empty := get(NewHandler(knownPad(), &fakeWriter{}, &fakeLibrary{}, nil), "/devices/0/keys")
 	if empty.Body.String() != "[]\n" {
 		t.Errorf("empty list body = %q, want []", empty.Body)
+	}
+}
+
+// F11: a claimed key with no status record (e.g. blanked by the engine
+// internally) is still listed, once, alongside keys that have records.
+func TestListKeysIncludesOwnedWithoutRecord(t *testing.T) {
+	disp := knownPad()
+	disp.owned = []uint16{4, 7}
+	w := &fakeWriter{status: map[effects.Target]effects.Status{
+		ledTarget(7): {Origin: effects.Origin{Type: "color", Ref: "red"}},
+		ledTarget(2): {Origin: effects.Origin{Type: "color", Ref: "blue"}},
+	}}
+	rec := get(NewHandler(disp, w, &fakeLibrary{}, nil), "/devices/0/keys")
+	var got []struct{ LED uint16 }
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	var leds []uint16
+	for _, k := range got {
+		leds = append(leds, k.LED)
+	}
+	if fmt.Sprint(leds) != "[2 4 7]" {
+		t.Errorf("listed LEDs = %v, want [2 4 7]", leds)
 	}
 }
 

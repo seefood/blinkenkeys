@@ -3,6 +3,7 @@ package dispatcher
 import (
 	"context"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/seefood/blinkenkeys/internal/color"
@@ -64,6 +65,23 @@ func (r *Registry) KeyInfo(device string, idx uint16) KeyInfo {
 	return ki
 }
 
+// OwnedLEDs returns device's name- or direct-owned LED indexes, ascending;
+// nil for an unknown device.
+func (r *Registry) OwnedLEDs(device string) []uint16 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	s, ok := r.slots[device]
+	if !ok {
+		return nil
+	}
+	leds := make([]uint16, 0, len(s.owners))
+	for idx := range s.owners {
+		leds = append(leds, idx)
+	}
+	slices.Sort(leds)
+	return leds
+}
+
 // Lookup resolves addr to led:N without side effects: a Name must already
 // be claimed (ErrClaimNotFound otherwise) and is neither claimed nor
 // refreshed; any other form resolves against the matrix without being
@@ -98,6 +116,9 @@ func (d *Dispatcher) Lookup(ctx context.Context, device string, addr keyaddr.Add
 func (d *Dispatcher) KeyInfo(device string, led uint16) KeyInfo {
 	return d.registry.KeyInfo(device, led)
 }
+
+// OwnedLEDs is Registry.OwnedLEDs.
+func (d *Dispatcher) OwnedLEDs(device string) []uint16 { return d.registry.OwnedLEDs(device) }
 
 // CurrentColor returns the frame buffer's color for one LED. It is the
 // desired color: VialRGB gives no way to read hardware state back.

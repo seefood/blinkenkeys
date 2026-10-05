@@ -147,11 +147,20 @@ func (h *Handler) listKeys(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := time.Now()
-	views := []keyView{}
+	// Owned LEDs plus LEDs with a status record: a claimed key can have no
+	// record (blanked internally), and a record can outlive ownership.
+	leds := map[uint16]bool{}
+	for _, led := range h.disp.OwnedLEDs(device) {
+		leds[led] = true
+	}
 	for t := range h.w.Statuses(device, now) {
 		if t.Addr.Kind == keyaddr.LED {
-			views = append(views, h.buildView(device, t.Addr.N, t.Addr.String(), now))
+			leds[t.Addr.N] = true
 		}
+	}
+	views := []keyView{}
+	for led := range leds {
+		views = append(views, h.buildView(device, led, keyaddr.Address{Kind: keyaddr.LED, N: led}.String(), now))
 	}
 	sort.Slice(views, func(i, j int) bool { return views[i].LED < views[j].LED })
 	writeJSON(w, http.StatusOK, views)

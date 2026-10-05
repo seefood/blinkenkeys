@@ -29,6 +29,7 @@ type Dispatcher interface {
 	ReleaseClaim(device, name string) error
 	Lookup(ctx context.Context, device string, addr keyaddr.Address) (keyaddr.Address, error)
 	KeyInfo(device string, led uint16) dispatcher.KeyInfo
+	OwnedLEDs(device string) []uint16
 	CurrentColor(device string, led uint16) (color.HSV, bool)
 	Layout(device string) dispatcher.Layout
 	Connected(device string) bool

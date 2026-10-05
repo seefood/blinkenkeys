@@ -39,6 +39,25 @@ func TestLookupNameDoesNotClaim(t *testing.T) {
 	}
 }
 
+func TestOwnedLEDs(t *testing.T) {
+	d := padDispatcher(t)
+	if got := d.OwnedLEDs("a"); len(got) != 0 {
+		t.Errorf("OwnedLEDs before any claim = %v, want none", got)
+	}
+	idx, err := d.registry.ClaimOrGet("a", "esc", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.registry.MarkDirect("a", 0)
+	want := []uint16{0, idx}
+	if got := d.OwnedLEDs("a"); len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("OwnedLEDs = %v, want %v (sorted)", got, want)
+	}
+	if got := d.OwnedLEDs("nope"); got != nil {
+		t.Errorf("OwnedLEDs(unknown) = %v, want nil", got)
+	}
+}
+
 // Lookup is read-only: it must not refresh the claim's idle clock, or a GET
 // would keep an abandoned claim alive past claims.idle_timeout.
 func TestLookupLeavesIdleClockAndKeyInfoOnNamedClaim(t *testing.T) {
