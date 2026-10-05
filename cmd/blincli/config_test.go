@@ -1,6 +1,8 @@
 package main
 
 import (
+	"errors"
+	iofs "io/fs"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -172,6 +174,60 @@ func TestConfigInitForceReplacesSymlinkNotTarget(t *testing.T) {
 	if fi, err := os.Lstat(path); err != nil || fi.Mode()&os.ModeSymlink != 0 || fi.Mode().Perm() != 0o600 {
 		t.Errorf("link not replaced by 0600 file: %v %v", fi, err)
 	}
+}
+
+func noTempLeft(t *testing.T, dir string) {
+	t.Helper()
+	if m, _ := filepath.Glob(filepath.Join(dir, ".blincli-*.tmp")); len(m) != 0 {
+		t.Errorf("temp files left behind: %v", m)
+	}
+}
+
+func TestConfigInitForceOnDirectoryFailsCleanly(t *testing.T) {
+	a, path, _, errs := cfgApp(t, nil)
+	if err := os.MkdirAll(filepath.Join(path, "inner"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	code := a.run([]string{"config", "init", "-C", path, "--force", "--token", "t"})
+	if code == 0 || code == 2 || errs.Len() == 0 {
+		t.Errorf("--force onto a directory: code %d, stderr %q", code, errs)
+	}
+	if fi, err := os.Stat(filepath.Join(path, "inner")); err != nil || !fi.IsDir() {
+		t.Errorf("directory target damaged: %v %v", fi, err)
+	}
+	noTempLeft(t, filepath.Dir(path))
+}
+
+// Without --force, writeConfig itself must refuse an existing target (the
+// Lstat check in configInit is only the friendly message; a file created
+// after it must still not be clobbered).
+func TestWriteConfigNoClobber(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "blincli.yaml")
+	if err := os.WriteFile(path, []byte("mine\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeConfig(path, "new\n", false); !errors.Is(err, iofs.ErrExist) {
+		t.Errorf("err = %v, want ErrExist", err)
+	}
+	if b, _ := os.ReadFile(path); string(b) != "mine\n" {
+		t.Errorf("existing file clobbered: %q", b)
+	}
+	noTempLeft(t, dir)
+	fresh := filepath.Join(dir, "fresh.yaml")
+	if err := writeConfig(fresh, "new\n", false); err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Stat(fresh); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Errorf("fresh file: %v %v", fi, err)
+	}
+	if err := writeConfig(path, "new\n", true); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(path); string(b) != "new\n" {
+		t.Errorf("force did not replace: %q", b)
+	}
+	noTempLeft(t, dir)
 }
 
 func TestConfigInitDanglingSymlinkNeedsForce(t *testing.T) {

@@ -130,7 +130,9 @@ func (a *app) configInit(args []string) int {
 	if fc.Device == "" && (fc.URL != "" || fc.Socket != "") {
 		fc.Device = a.probeDevice(fc)
 	}
-	if err := writeConfig(path, renderConfig(fc)); err != nil {
+	if err := writeConfig(path, renderConfig(fc), force); errors.Is(err, iofs.ErrExist) {
+		return a.fail(fmt.Errorf("%w: %s already exists (use --force to overwrite)", client.ErrUsage, path))
+	} else if err != nil {
 		return a.fail(err)
 	}
 	if !g.Quiet {
@@ -190,29 +192,35 @@ func (a *app) probeDevice(fc client.FileConfig) string {
 	return ""
 }
 
-func writeConfig(path, content string) error {
+// writeConfig writes content to path via a temp file (created 0600 by
+// CreateTemp), so the final mode is always 0600 and an existing symlink is
+// replaced rather than written through. With force it renames over path;
+// without, it hard-links the temp file into place, which fails with
+// fs.ErrExist if anything (even a dangling symlink) appeared at path since
+// the caller checked. The temp file never outlives the call.
+func writeConfig(path, content string, force bool) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	// Temp file (created 0600 by CreateTemp) + rename: the final mode is always
-	// 0600 and an existing symlink is replaced rather than written through.
 	f, err := os.CreateTemp(filepath.Dir(path), ".blincli-*.tmp")
 	if err != nil {
 		return err
 	}
 	tmp := f.Name()
+	defer func() { _ = os.Remove(tmp) }() // no-op after a successful rename
 	if _, err := f.WriteString(content); err != nil {
 		_ = f.Close()
-		_ = os.Remove(tmp)
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
 		return err
 	}
 	if err := f.Close(); err != nil {
-		_ = os.Remove(tmp)
 		return err
 	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return err
+	if force {
+		return os.Rename(tmp, path)
 	}
-	return nil
+	return os.Link(tmp, path)
 }
