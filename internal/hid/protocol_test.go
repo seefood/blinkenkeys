@@ -2,6 +2,7 @@ package hid
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -15,6 +16,7 @@ type fakeDevice struct {
 	i        int
 	writeErr error
 	readErr  error
+	readErrs []error // consumed one per ReadWithTimeout call, before replies
 }
 
 func (f *fakeDevice) Write(p []byte) (int, error) {
@@ -28,6 +30,11 @@ func (f *fakeDevice) Write(p []byte) (int, error) {
 }
 
 func (f *fakeDevice) ReadWithTimeout(p []byte, _ time.Duration) (int, error) {
+	if len(f.readErrs) > 0 {
+		err := f.readErrs[0]
+		f.readErrs = f.readErrs[1:]
+		return 0, err
+	}
 	if f.readErr != nil {
 		return 0, f.readErr
 	}
@@ -95,7 +102,8 @@ func TestGetKeyboardUID(t *testing.T) {
 
 func TestGetNumberLEDs(t *testing.T) {
 	reply := make([]byte, ReportLen)
-	reply[2], reply[3] = 0x2C, 0x01 // 300 little-endian
+	reply[0], reply[1] = cmdViaLightingGetValue, valVialRGBGetNumberLEDs // echoed request
+	reply[2], reply[3] = 0x2C, 0x01                                      // 300 little-endian
 	d := newDevice(&fakeDevice{replies: [][]byte{reply}})
 
 	n, err := d.GetNumberLEDs()
@@ -109,7 +117,8 @@ func TestGetNumberLEDs(t *testing.T) {
 
 func TestGetLEDInfo(t *testing.T) {
 	reply := make([]byte, ReportLen)
-	reply[5], reply[6] = 2, 3 // row, col
+	reply[0], reply[1] = cmdViaLightingGetValue, valVialRGBGetLEDInfo // echoed request
+	reply[5], reply[6] = 2, 3                                         // row, col
 	d := newDevice(&fakeDevice{replies: [][]byte{reply}})
 
 	row, col, err := d.GetLEDInfo(7)
@@ -171,5 +180,53 @@ func TestSetKeysTooMany(t *testing.T) {
 	}
 	if err := d.SetKeys(keys); err == nil {
 		t.Fatal("SetKeys: want error for more than maxKeysPerReport keys")
+	}
+}
+
+// hidapi's Linux backend reports an interrupted poll() as a plain error
+// string (strerror), not a typed errno; Go's runtime signals threads often.
+var errInterrupted = errors.New("Interrupted system call") //nolint:staticcheck // verbatim glibc strerror(EINTR)
+
+func TestSendReportRetriesInterruptedReadWithoutRewriting(t *testing.T) {
+	reply := make([]byte, ReportLen)
+	dev := &fakeDevice{readErrs: []error{errInterrupted, errInterrupted}, replies: [][]byte{reply}}
+	if _, err := sendReport(dev, []byte{0x01}); err != nil {
+		t.Fatalf("sendReport: %v", err)
+	}
+	if len(dev.writes) != 1 {
+		t.Errorf("wrote %d times, want 1: the reply to the first write is still pending", len(dev.writes))
+	}
+}
+
+func TestSendReportGivesUpOnPersistentInterrupts(t *testing.T) {
+	dev := &fakeDevice{readErrs: []error{errInterrupted, errInterrupted, errInterrupted, errInterrupted, errInterrupted}}
+	if _, err := sendReport(dev, []byte{0x01}); err == nil {
+		t.Fatal("want error after bounded retries")
+	}
+}
+
+func TestSendReportDoesNotRetryOtherReadErrors(t *testing.T) {
+	dev := &fakeDevice{readErrs: []error{fmt.Errorf("device disconnected")}, replies: [][]byte{make([]byte, ReportLen)}}
+	if _, err := sendReport(dev, []byte{0x01}); err == nil {
+		t.Fatal("want the read error returned")
+	}
+}
+
+func TestGetNumberLEDsRejectsReplyToAnotherRequest(t *testing.T) {
+	// A stale Vial keyboard-ID reply (06 00 00 00 <uid>) would otherwise parse as 0 LEDs.
+	stale := make([]byte, ReportLen)
+	stale[0] = 0x06
+	dev := &fakeDevice{replies: [][]byte{stale}}
+	if n, err := newDevice(dev).GetNumberLEDs(); err == nil {
+		t.Errorf("GetNumberLEDs = %d, nil; want an error for a reply that does not echo 08 43", n)
+	}
+}
+
+func TestGetLEDInfoRejectsReplyToAnotherRequest(t *testing.T) {
+	stale := make([]byte, ReportLen)
+	stale[0] = 0x06
+	dev := &fakeDevice{replies: [][]byte{stale}}
+	if _, _, err := newDevice(dev).GetLEDInfo(0); err == nil {
+		t.Error("GetLEDInfo: want an error for a reply that does not echo 08 44")
 	}
 }

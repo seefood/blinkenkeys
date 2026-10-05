@@ -6,6 +6,8 @@ package hid
 
 import (
 	"fmt"
+	"strings"
+	"syscall"
 	"time"
 )
 
@@ -36,6 +38,10 @@ const (
 	maxKeysPerReport = 9
 
 	reportTimeout = 1 * time.Second
+
+	// maxReadInterrupts bounds how often one reply read is retried after an
+	// interrupted poll().
+	maxReadInterrupts = 3
 )
 
 // rawDevice is the subset of *goHid.Device this package depends on, so
@@ -62,6 +68,12 @@ func sendReport(dev rawDevice, payload []byte) ([]byte, error) {
 	}
 	resp := make([]byte, ReportLen)
 	n, err := dev.ReadWithTimeout(resp, reportTimeout)
+	// The write already went out, so its reply is pending: retry only the
+	// read. Re-sending would leave that reply queued to be mistaken for the
+	// next request's.
+	for i := 0; i < maxReadInterrupts && isInterrupted(err); i++ {
+		n, err = dev.ReadWithTimeout(resp, reportTimeout)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("hid: read: %w", err)
 	}
@@ -69,6 +81,23 @@ func sendReport(dev rawDevice, payload []byte) ([]byte, error) {
 		return nil, fmt.Errorf("hid: short read: got %d bytes, want %d", n, ReportLen)
 	}
 	return resp, nil
+}
+
+// isInterrupted reports whether err is an interrupted poll(). hidapi's Linux
+// backend returns only strerror(errno) text for it (no typed errno), and Go's
+// runtime signals threads often enough that it happens in practice.
+func isInterrupted(err error) bool {
+	return err != nil && strings.Contains(strings.ToLower(err.Error()), strings.ToLower(syscall.EINTR.Error()))
+}
+
+// checkEcho verifies resp answers the request starting with cmd, val: VialRGB
+// replies echo the command bytes, so anything else is a stale or unrelated
+// report left in the buffer.
+func checkEcho(resp []byte, cmd, val byte) error {
+	if resp[0] != cmd || resp[1] != val {
+		return fmt.Errorf("hid: reply %02x %02x does not answer request %02x %02x", resp[0], resp[1], cmd, val)
+	}
+	return nil
 }
 
 // Device is an open connection to one Vial-capable raw-HID interface.
@@ -102,6 +131,9 @@ func (d *Device) GetNumberLEDs() (uint16, error) {
 	if err != nil {
 		return 0, err
 	}
+	if err := checkEcho(resp, cmdViaLightingGetValue, valVialRGBGetNumberLEDs); err != nil {
+		return 0, err
+	}
 	return uint16(resp[2]) | uint16(resp[3])<<8, nil
 }
 
@@ -113,6 +145,9 @@ func (d *Device) GetLEDInfo(index uint16) (row, col uint8, err error) {
 		byte(index), byte(index >> 8), // #nosec G115 -- little-endian split of a uint16 into its two bytes, not a truncation
 	})
 	if err != nil {
+		return 0, 0, err
+	}
+	if err := checkEcho(resp, cmdViaLightingGetValue, valVialRGBGetLEDInfo); err != nil {
 		return 0, 0, err
 	}
 	return resp[5], resp[6], nil

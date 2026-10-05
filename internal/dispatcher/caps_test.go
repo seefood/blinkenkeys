@@ -124,3 +124,16 @@ func TestGetCapabilitiesAppliesPending(t *testing.T) {
 		t.Errorf("log %q does not name the dropped address 5,9", logs.String())
 	}
 }
+
+func TestZeroLEDCountIsAFailureNotCapabilities(t *testing.T) {
+	reg := registryWithConnected("a", &fakeController{numLEDs: 0})
+	d := New(reg, NewCache(), 8, discardLogger())
+	runDispatcher(t, d)
+
+	if _, err := d.GetCapabilities(context.Background(), "a"); err == nil {
+		t.Fatal("GetCapabilities with 0 LEDs: want error")
+	}
+	if _, known, _ := reg.Caps("a"); known {
+		t.Error("a zero LED count must not be stored as known capabilities")
+	}
+}

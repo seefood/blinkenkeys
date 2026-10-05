@@ -2,6 +2,7 @@ package dispatcher
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -320,6 +321,11 @@ func queryCapabilities(ctrl hid.Controller) (Capabilities, error) {
 	n, err := ctrl.GetNumberLEDs()
 	if err != nil {
 		return Capabilities{}, err
+	}
+	if n == 0 {
+		// A VialRGB board always has LEDs; 0 is a bad reply, and storing it
+		// would make every key write 404 until restart.
+		return Capabilities{}, errors.New("dispatcher: device reported 0 LEDs")
 	}
 	caps := Capabilities{LEDCount: int(n)}
 	for i := uint16(0); i < n; i++ {
