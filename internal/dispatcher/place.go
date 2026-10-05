@@ -34,6 +34,8 @@ func (r *Registry) MarkDirectDisplacing(device string, idx uint16) Moved {
 		return Moved{}
 	}
 	l := r.layoutLocked(device)
+	// s.caps == nil is unreachable via Place (it fetches capabilities first);
+	// the guard only protects direct callers of this method.
 	if l.Displace && s.caps != nil {
 		if to, ok := nextUnclaimedLocked(s, l); ok {
 			c := s.claims[owner.Name]

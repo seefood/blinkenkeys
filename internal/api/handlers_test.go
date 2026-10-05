@@ -47,7 +47,7 @@ func (f *fakeDispatcher) CurrentColor(string, uint16) (color.HSV, bool) {
 	return *f.curColor, true
 }
 func (f *fakeDispatcher) Layout(string) dispatcher.Layout { return f.layout }
-func (f *fakeDispatcher) Connected(string) bool          { return !f.disconnected }
+func (f *fakeDispatcher) Connected(string) bool           { return !f.disconnected }
 
 func (f *fakeDispatcher) ResolveDevice(ref string) (string, bool) {
 	name, ok := f.devices[ref]

@@ -107,10 +107,16 @@ func (h *Handler) writeKey(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	// The body is validated first: a bad request must not displace anything.
+	// The body is fully validated (decode, color parse, effect/state lookup)
+	// before Place: a bad request must not displace anything.
 	body, err := decodeWriteBody(r.Body)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	run, err := h.prepare(body)
+	if err != nil {
+		writeError(w, statusFor(err), err)
 		return
 	}
 	addr, moved, err := h.disp.Place(r.Context(), device, addr)
@@ -122,32 +128,41 @@ func (h *Handler) writeKey(w http.ResponseWriter, r *http.Request) {
 	target := effects.Target{Device: device, Addr: addr}
 	// Capture the displaced key's last request before the incoming write
 	// replaces its status record.
-	var carry *writeBody
+	// The status read here and the replay below are not atomic with Place:
+	// a concurrent write to the key in between can be replayed stale. Best
+	// effort by design.
+	var carry func(effects.Target, time.Time) error
 	if moved != nil && !moved.Dropped {
 		if st, ok := h.w.Status(target, now); ok {
 			if b, ok := bodyOf(st.Origin); ok {
-				carry = &b
+				if c, err := h.prepare(b); err == nil {
+					carry = c
+				}
 			}
 		}
 	}
-	if err := h.apply(target, body, now); err != nil {
-		writeError(w, statusFor(err), err)
-		return
-	}
+	writeErr := run(target, now)
+	// Replay even when the incoming write failed after Place (queue full,
+	// HID error): the claim has already moved, so it must not be left dark.
 	if carry != nil {
 		to := effects.Target{Device: device, Addr: keyaddr.Address{Kind: keyaddr.LED, N: moved.To}}
-		// Best effort: the incoming write already succeeded; a failure to
-		// restore the displaced key must not fail it.
-		if err := h.apply(to, *carry, now); err != nil && h.logger != nil {
+		// Best effort: a failure to restore the displaced key must not fail
+		// the incoming write.
+		if err := carry(to, now); err != nil && h.logger != nil {
 			h.logger.Warn("displace: re-apply failed", "device", device, "name", moved.Name, "err", err)
 		}
+	}
+	if writeErr != nil {
+		writeError(w, statusFor(writeErr), writeErr)
+		return
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
 // bodyOf rebuilds the request that produced o, so a displaced key's color,
 // effect or state can be replayed on its new key. ok is false for an origin
-// with no replayable source.
+// with no replayable source. Replaying an effect restarts its timeline at the
+// replay time; it does not resume the phase it had on the old key.
 func bodyOf(o effects.Origin) (writeBody, bool) {
 	var b writeBody
 	switch o.Type {
@@ -243,6 +258,17 @@ func decodeWriteBody(r io.Reader) (writeBody, error) {
 }
 
 func (h *Handler) apply(t effects.Target, b writeBody, now time.Time) error {
+	run, err := h.prepare(b)
+	if err != nil {
+		return err
+	}
+	return run(t, now)
+}
+
+// prepare does all of b's semantic validation (color parse, effect/state
+// lookup) and returns the write to run, so writeKey can reject a bad request
+// before Place displaces anything. Only write failures remain in run.
+func (h *Handler) prepare(b writeBody) (func(effects.Target, time.Time) error, error) {
 	owner := ""
 	if b.Owner != nil {
 		owner = *b.Owner
@@ -251,25 +277,27 @@ func (h *Handler) apply(t effects.Target, b writeBody, now time.Time) error {
 	case b.Color != nil:
 		c, err := color.ParseHSV(*b.Color)
 		if err != nil {
-			return fmt.Errorf("%w: %v", errBadRequest, err)
+			return nil, fmt.Errorf("%w: %v", errBadRequest, err)
 		}
-		return h.w.SetColorFrom(t, c, effects.Origin{Type: "color", Ref: *b.Color, Owner: owner}, now)
+		o := effects.Origin{Type: "color", Ref: *b.Color, Owner: owner}
+		return func(t effects.Target, now time.Time) error { return h.w.SetColorFrom(t, c, o, now) }, nil
 	case b.Effect != nil:
 		tl, err := h.lib.Effect(*b.Effect)
 		if err != nil {
-			return err
+			return nil, err
 		}
-		return h.w.StartFrom(t, tl, now, effects.Origin{Type: "effect", Ref: *b.Effect, Owner: owner})
+		o := effects.Origin{Type: "effect", Ref: *b.Effect, Owner: owner}
+		return func(t effects.Target, now time.Time) error { return h.w.StartFrom(t, tl, now, o) }, nil
 	default:
 		act, err := h.lib.State(*b.State)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		o := effects.Origin{Type: "state", Ref: *b.State, Owner: owner}
 		if act.Color != nil {
-			return h.w.SetColorFrom(t, *act.Color, o, now)
+			return func(t effects.Target, now time.Time) error { return h.w.SetColorFrom(t, *act.Color, o, now) }, nil
 		}
-		return h.w.StartFrom(t, act.Timeline, now, o)
+		return func(t effects.Target, now time.Time) error { return h.w.StartFrom(t, act.Timeline, now, o) }, nil
 	}
 }
 
