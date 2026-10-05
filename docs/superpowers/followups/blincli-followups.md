@@ -27,47 +27,7 @@ Priority: **P1** behavior/security gap, **P2** correctness edge, **P3** polish/t
 | V4 | Kitty, zellij, GNU screen and Windows Terminal env detection are unverified (spec marks them so). | Verify the env vars on each terminal, add resolver tests. |
 | V5 | The running daemon on the dev machine predates this branch (`GET /keys/{pos}` → 405). | Install the branch's `blinkenkeysd` and restart before using `hooks-blincli.json`. |
 
-## P1
-
-### F1. Malformed `blincli.yaml` should exit 78, not 1
-- Where: `internal/client/config.go` (parse error path), exit mapping in `cmd/blincli/main.go`.
-- Today: a YAML parse error returns a plain error → exit 1 ("daemon error"). Spec: 78 = no/invalid config.
-- Test: write an invalid file, assert exit 78 and that the message contains no file content (token redaction already covered by `TestConfigParseErrorDoesNotLeakToken`-style tests).
-
-### F2. Warn when `blincli.yaml` holding a token is group/world-readable
-- Where: `internal/client/config.go` `LoadFile`.
-- Today: `config init` writes 0600 but nothing checks a hand-edited or old file.
-- Fix: if the file contains a token and mode & 0o077 != 0, print a one-line warning on stderr (not an error; keep exit codes). Skip on platforms without Unix modes.
-- Test: 0644 file with token → warning, no token in output; 0600 → silent.
-
-### F3. A runtime panic exits 2
-- Where: `cmd/blincli/main.go` `main`. Claude Code hooks treat exit 2 as blocking.
-- Fix: `defer` a recover that prints a short error and exits 1.
-- Test: inject a panicking command via the registry, assert exit 1 and not 2.
-
 ## P2
-
-### F4. `-n NAME` validation
-- Where: `internal/client/key.go` (~L271), `termid.Sanitize`.
-- Today: `-n led:3` / `-n idx:2` is treated by the daemon as a direct address (a write, not a claim); `-n .` / `-n ..` hit ServeMux path-cleaning redirects.
-- Fix: reject those (usage error 64) or run `Sanitize` on explicit names.
-- Test: each of the four inputs exits 64 (or is sanitized) and sends no request.
-
-### F5. Overlong names fail every write with a 400
-- Today: daemon owner/name limit is 1–128 bytes; sanitized name + host prefix (and `$BLINKENKEYS_NAME`) is unbounded, so a long name makes every write exit 1.
-- Fix: truncate with a stable hash suffix in `Sanitize`/`Qualify` so the result is ≤128 bytes and deterministic.
-- Test: 300-byte input yields ≤128 bytes, same input → same output, distinct inputs → distinct outputs.
-
-### F6. `-n NAME` is host-prefixed on remote endpoints
-- Where: `Plan.Qualify` applied to `ModeNamed` from `-n`. Spec only prefixes *derived* names.
-- Effect: two hosts cannot intentionally share an explicit name.
-- Fix: qualify only derived names; keep explicit `-n` verbatim. Update `get` to match (it must use the same rule as set/clear).
-- Test: remote `set -n foo` PUTs `foo`; derived names still get the host prefix.
-
-### F7. `--url` with path or query is concatenated raw
-- Where: `internal/client/http.go` (~L79): `http://h:1/?x=1` → `…/?x=1/devices/…`.
-- Fix: reject a non-empty path (other than `/`) or query in `Endpoint` resolution with usage error 64, or join with `url.JoinPath`.
-- Test: both forms.
 
 ### F8. Conditional `clear` after a daemon restart
 - Where: `internal/api/handlers.go` (~L212-216). Status records are in-memory, so after a restart a stale session's `clear?owner=` finds no record and blanks the key now owned by another session.
@@ -106,14 +66,8 @@ Priority: **P1** behavior/security gap, **P2** correctness edge, **P3** polish/t
 - **T10** Key view reads (`getKey`, `buildView`) are non-atomic and `getKey` calls `KeyInfo` twice (`keyview.go:116`): single read.
 - **T11** `Place` has no live-dispatcher test (fakes only): add one against the real dispatcher with a fake HID backend.
 - **T12** `termid`: the second tmux call runs after the first failed; the real-exec test relies on `sleep` being on PATH. Short-circuit, and make the test self-contained.
-- **T13** Token-file read error: wrap with `%w` so the cause is inspectable (check the final text still has no token).
-- **T14** `detect` ignores `-v`/`-q`; `detect -h` prints the global usage; `vlog` uses a non-constant format string.
-- **T15** `-v` given before the command can only be switched off after it with `-v=false`: document, or make command-position tri-state.
-- **T16** `RedactURL` masks only the password; the username stays visible (stdlib `url.Redacted`). Mask the username too if usernames are considered sensitive.
-- **T17** `set`/`get`: redundant `slots<0` clamp; `clear -n` without `--force` releases the name unconditionally on the first DELETE (per brief; revisit with F8/F9); files are named `set.go` etc. rather than `cmd_set.go` (naming only, do not rename without approval).
-- **T18** `-m N` semantics (idx 0..N-1, same as set) changed during a fix round with no dedicated test: add one. `planKey` runs `Detect` even for `-k`: skip when a key is explicit.
-- **T19** `writeConfig` (`cmd/blincli/config.go`): `f.Sync()` before rename; no-clobber create without `--force` (`os.Link` + remove temp); tests for `--force` on a directory target and for no leftover `.blincli-*.tmp` after failure.
-- **T20** Docs: `examples/config/README.md` comment indent in the schema block; manual-check step 6 wording is hedged ("404-or-blank-state"): make it a single expected result; integrations README: add a WezTerm tab-order caveat, mention the full-pool `displace` fallback and that `applyPending` always uses last-wins; manual-check "automated coverage exercises the same logic" sentence is unverified, reword or remove; check 10's `-k idx:99 → 404` is inferred, mark "expected".
+- **T16** (declined) `RedactURL` masks only the password; the username stays visible (stdlib `url.Redacted`): kept by decision, usernames are not treated as secret.
+- **T17** (noted) `clear -n` without `--force` releases the name unconditionally on the first DELETE: kept per the original brief, revisit with F8/F9. Files stay named `set.go` etc. rather than `cmd_set.go`: naming only, do not rename without approval.
 - **T21** Tooling: `prek` `go-sec-mod` cannot find `gosec` on PATH, so `make lint` fails on that hook only. Fix the hook entry or document the PATH requirement. `mcp__ide__getDiagnostics` was unavailable during this work, so IDE diagnostics were never run.
 
 ## Housekeeping (not code)
