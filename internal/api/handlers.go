@@ -23,6 +23,7 @@ import (
 type Dispatcher interface {
 	ResolveDevice(ref string) (string, bool)
 	Canonical(ctx context.Context, device string, addr keyaddr.Address) (keyaddr.Address, error)
+	Place(ctx context.Context, device string, addr keyaddr.Address) (keyaddr.Address, *dispatcher.Moved, error)
 	ListDevices(ctx context.Context) ([]dispatcher.DeviceSummary, error)
 	GetCapabilities(ctx context.Context, device string) (dispatcher.Capabilities, error)
 	ReleaseClaim(device, name string) error
@@ -106,21 +107,63 @@ func (h *Handler) writeKey(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	addr, err = h.disp.Canonical(r.Context(), device, addr)
-	if err != nil {
-		writeError(w, statusFor(err), err)
-		return
-	}
+	// The body is validated first: a bad request must not displace anything.
 	body, err := decodeWriteBody(r.Body)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	if err := h.apply(effects.Target{Device: device, Addr: addr}, body, time.Now()); err != nil {
+	addr, moved, err := h.disp.Place(r.Context(), device, addr)
+	if err != nil {
 		writeError(w, statusFor(err), err)
 		return
 	}
+	now := time.Now()
+	target := effects.Target{Device: device, Addr: addr}
+	// Capture the displaced key's last request before the incoming write
+	// replaces its status record.
+	var carry *writeBody
+	if moved != nil && !moved.Dropped {
+		if st, ok := h.w.Status(target, now); ok {
+			if b, ok := bodyOf(st.Origin); ok {
+				carry = &b
+			}
+		}
+	}
+	if err := h.apply(target, body, now); err != nil {
+		writeError(w, statusFor(err), err)
+		return
+	}
+	if carry != nil {
+		to := effects.Target{Device: device, Addr: keyaddr.Address{Kind: keyaddr.LED, N: moved.To}}
+		// Best effort: the incoming write already succeeded; a failure to
+		// restore the displaced key must not fail it.
+		if err := h.apply(to, *carry, now); err != nil && h.logger != nil {
+			h.logger.Warn("displace: re-apply failed", "device", device, "name", moved.Name, "err", err)
+		}
+	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// bodyOf rebuilds the request that produced o, so a displaced key's color,
+// effect or state can be replayed on its new key. ok is false for an origin
+// with no replayable source.
+func bodyOf(o effects.Origin) (writeBody, bool) {
+	var b writeBody
+	switch o.Type {
+	case "color":
+		b.Color = &o.Ref
+	case "effect":
+		b.Effect = &o.Ref
+	case "state":
+		b.State = &o.Ref
+	default:
+		return writeBody{}, false
+	}
+	if o.Owner != "" {
+		b.Owner = &o.Owner
+	}
+	return b, true
 }
 
 // releaseKey blanks a key (cancelling any running effect) and, if {pos} is a
