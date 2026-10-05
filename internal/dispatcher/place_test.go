@@ -1,9 +1,12 @@
 package dispatcher
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/seefood/blinkenkeys/internal/keyaddr"
 )
 
 func TestDisplaceMovesNamedClaimToNextPoolKey(t *testing.T) {
@@ -65,6 +68,45 @@ func TestDisplaceWithEveryPoolSlotClaimedLeavesOthersIntact(t *testing.T) {
 	// Displacing y while everything is owned is the same drop, no panic.
 	if m := r.MarkDirectDisplacing("a", 5); m != (Moved{Name: "y", From: 5, Dropped: true}) {
 		t.Errorf("second Moved = %+v", m)
+	}
+}
+
+// Place end to end on a running dispatcher with a fake HID backend: the
+// device's capabilities are fetched on first use, a direct write onto a
+// named claim moves it (displace), and a full pool drops it (no Moved).
+func TestPlaceOnLiveDispatcher(t *testing.T) {
+	fc := sixLEDPad()
+	d := New(registryWithConnected("a", fc), NewCache(), 8, discardLogger())
+	runDispatcher(t, d)
+	d.registry.SetLayout("a", Layout{Pool: []uint16{4, 5}, Displace: true})
+	ctx := context.Background()
+
+	got, m, err := d.Place(ctx, "a", keyaddr.Address{Kind: keyaddr.Name, Name: "x"})
+	if err != nil || got != led(4) || m != nil {
+		t.Fatalf("Place(x) = %v, %+v, %v; want led:4, no move", got, m, err)
+	}
+	if fc.capsQueries() != 1 {
+		t.Errorf("capability queries = %d, want 1 (fetched by the first Place)", fc.capsQueries())
+	}
+	got, m, err = d.Place(ctx, "a", keyaddr.Address{Kind: keyaddr.RowCol, Row: 2, Col: 0}) // LED 4
+	if err != nil || got != led(4) || m == nil || *m != (Moved{Name: "x", From: 4, To: 5}) {
+		t.Fatalf("Place(2,0) = %v, %+v, %v; want led:4, x moved 4->5", got, m, err)
+	}
+	if idx, _, err := d.registry.LookupClaim("a", "x"); err != nil || idx != 5 {
+		t.Errorf("x = %d, %v; want 5", idx, err)
+	}
+	// Pool is now full (4 direct, 5 = x): displacing x drops the claim.
+	if got, m, err = d.Place(ctx, "a", keyaddr.Address{Kind: keyaddr.Idx, N: 5}); err != nil || got != led(5) || m != nil {
+		t.Fatalf("Place(idx:5) = %v, %+v, %v; want led:5, no move", got, m, err)
+	}
+	if _, _, err := d.registry.LookupClaim("a", "x"); !errors.Is(err, ErrClaimNotFound) {
+		t.Errorf("x must be released with a full pool, err = %v", err)
+	}
+	if _, _, err := d.Place(ctx, "a", keyaddr.Address{Kind: keyaddr.Idx, N: 99}); !errors.Is(err, ErrKeyNotFound) {
+		t.Errorf("off-matrix err = %v, want ErrKeyNotFound", err)
+	}
+	if _, _, err := d.Place(ctx, "nope", keyaddr.Address{Kind: keyaddr.Idx, N: 0}); !errors.Is(err, ErrDeviceNotFound) {
+		t.Errorf("unknown device err = %v, want ErrDeviceNotFound", err)
 	}
 }
 
