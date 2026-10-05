@@ -35,9 +35,9 @@ blincli devices [REF] [--json]
 `set` takes exactly one of `-c/--color` (hex, `H,S,V` in QMK 0-255, or a CSS/X11 name),
 `-e/--effect`, `-s/--state` — the API's exactly-one-of body. `-k/--key` takes any API `{pos}`
 form (`R,C`, `led:N`, `idx:N`, or a name). `-n/--name NAME` forces a named (pooled) registration.
-`-m/--slots N` is the tab-slot modulus (default 12; `slots:` in the client config).
-`--if-detected`: exit 0 silently if no key can be derived (replaces the old
-`[ -n "$WEZTERM_PANE" ] && ... || true` guard).
+`-m/--slots N` is the tab-slot modulus (default 6; `slots:` in the client config).
+`--if-detected`: opt-in; exit 0 silently if no key can be derived (replaces the old
+`[ -n "$WEZTERM_PANE" ] && ... || true` guard). Without it, an underivable key is an error.
 
 Flag parsing: stdlib `flag`, one `FlagSet` per subcommand, the dual short/long registration
 pattern already used by `cmd/blinkenkeysd`. No bundled short flags; flags precede positionals.
@@ -86,13 +86,17 @@ Order, first match wins:
 3. **Tab slot (direct write).** Detect the terminal; resolve its 1-based tab number N; key is
    `idx:((N-1) mod slots)`. `idx:` is the reading-order index over keyed LEDs, so on the
    reference device tabs 1-6 land on row 0 plus the first two row-1 keys (the user's
-   Option-1..6 iTerm tab-switch keys). Tabs beyond `slots` wrap and can collide (see below).
-4. **Named registration fallback.** Terminal detected but no tab number obtainable: claim a pool
-   key under a name derived from the terminal's pane/window id, e.g. `wezterm-17`.
-5. **Undecided** (open question): neither a tab number nor any terminal-instance id.
-   Interim behavior: exit 64 with a hint to pass `-k`/`-n`, or exit 0 silently under
-   `--if-detected`. Candidate identities to evaluate: controlling tty path, a session id
-   passed explicitly by the caller (e.g. `-n "$CLAUDE_CODE_SESSION_ID"`), refusing outright.
+   Option-1..6 iTerm tab-switch keys); idx 6-11 are reserved by the user for other functions
+   and are never written by tab slots. Tabs beyond `slots` wrap and can collide (see below).
+4. **Named registration fallback.** No tab number obtainable: claim a pool key under a name
+   derived from the first unique id found in the environment, in this order:
+   terminal instance id (`wezterm-17`, `kitty-4`, ...; see table), then `$BLINKENKEYS_NAME`,
+   then `$CLAUDE_CODE_SESSION_ID` (verified: already used by `hooks-basic.json`), then other
+   known session ids **[unverified]**: `$ZELLIJ_PANE_ID`, `$STY` (GNU screen),
+   `$WT_SESSION` (Windows Terminal), `$TERM_SESSION_ID` (Apple Terminal/iTerm).
+5. **No unique id anywhere** (no `-k`/`-n`, nothing in the env above): error, exit 64, with a
+   message listing `-k`, `-n`, and the env vars checked. Never guess an identity (no tty-path or
+   pid heuristics). `--if-detected` turns this into a silent exit 0.
 
 Remote transport: derived names/owners are prefixed with the short hostname
 (`laptop.wezterm-17`) so panes on different machines do not collide. Names must not contain
@@ -183,10 +187,16 @@ registered · 69 daemon unreachable · 77 auth missing/rejected · 78 no config/
 - `integrations/claude/README.md`: blincli section; `hooks-wezterm-pane.json` and its section
   stay as the raw-curl example.
 - The pool-conflict note: direct (`idx:`) writes permanently take a key out of the named-claim
-  pool, so tab slots 7-12 overlap pool keys (row >= 1) used by `hooks-basic.json` session claims.
+  pool, so any tab slot overlaps pool keys (row >= 1) that named claims (step 4) might hand out; and
+  the pool knows nothing of the user's reserved idx 6-11. **Open: daemon-side pool exclusion
+  (see Open items).**
 
 ## Open items
 
-- Key resolution step 5 (no tab number, no instance id): undecided, see above.
+- Named-claim pool vs. the keypad layout: `nextUnclaimedLocked` hands out the lowest-index
+  row >= 1 key not yet owned. That is idx 4-5 (tab slots 5-6, until first written) and then
+  idx 6-11 (reserved for other functions). The daemon needs a way to restrict the pool (e.g.
+  a `claims.pool` / `claims.reserved` setting in `config.yaml`), and the device may have no
+  keys left for named claims at all. Depends on the device's key count; unresolved.
 - Owner-tag collision policy: pending explicit confirmation.
 - All **[unverified]** entries: verify before implementing the corresponding piece.
