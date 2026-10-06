@@ -83,6 +83,20 @@ tab slots, `keys.pool` for named claims) and a `keys.collision` policy:
 [`integrations/claude/README.md`](integrations/claude/README.md) and the
 [design spec](docs/superpowers/specs/2026-10-05-blincli-design.md).
 
+## Releases
+
+`.github/workflows/release.yml` runs the tests, builds `blinkenkeysd` and
+`blincli` natively on linux/macOS × amd64/arm64 (the daemon is cgo), and
+publishes tarballs plus `SHA256SUMS` as a GitHub release. Each tarball keeps the
+repo layout (`bin/`, `packaging/<os>/`, `examples/config/`), so unpack it and run
+`packaging/<os>/install.sh`.
+
+Cut a release by pushing a tag (`git tag v0.2.0 && git push origin v0.2.0`), or
+run the workflow on `main` with a `version` input and it creates the tag. A `-`
+in the tag (`v0.2.0-rc1`) marks a prerelease. The macOS binaries are unsigned
+and not notarized: after a browser download, run
+`xattr -d com.apple.quarantine` on the extracted binaries.
+
 ## Scratching my itch
 
 I got this keypad thinking I will use it with the encoders as jog wheels for video editing.
