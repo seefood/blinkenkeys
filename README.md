@@ -18,8 +18,22 @@ also implemented, specced inline in Phase 3's "Named-key model" section; see
 
 ## Installation
 
-Requires Go 1.27+, a C compiler (cgo), and on Linux the `libudev-dev`
-headers. Build the binary first:
+**From a release tarball:** download the archive for your OS/arch and
+`SHA256SUMS` from the [releases page](https://github.com/seefood/blinkenkeys/releases),
+then verify, unpack and run the installer for your OS (below) from the
+extracted directory:
+
+```bash
+sha256sum -c --ignore-missing SHA256SUMS   # macOS: shasum -a 256 -c --ignore-missing SHA256SUMS
+tar xzf blinkenkeys-vX.Y.Z-<os>-<arch>.tar.gz
+cd blinkenkeys-vX.Y.Z-<os>-<arch>
+```
+
+macOS binaries are unsigned: after a browser download, run
+`xattr -dr com.apple.quarantine .` in the extracted directory first.
+
+**From source:** requires Go 1.27+, a C compiler (cgo), and on Linux the
+`libudev-dev` headers. Build the binary first:
 
 ```bash
 make build   # produces bin/blinkenkeysd and bin/blincli
@@ -88,14 +102,13 @@ tab slots, `keys.pool` for named claims) and a `keys.collision` policy:
 `.github/workflows/release.yml` runs the tests, builds `blinkenkeysd` and
 `blincli` natively on linux/macOS × amd64/arm64 (the daemon is cgo), and
 publishes tarballs plus `SHA256SUMS` as a GitHub release. Each tarball keeps the
-repo layout (`bin/`, `packaging/<os>/`, `examples/config/`), so unpack it and run
-`packaging/<os>/install.sh`.
+repo layout (`bin/`, `packaging/<os>/`, `examples/config/`), so the installers
+work unchanged (see Installation).
 
 Cut a release by pushing a tag (`git tag v0.2.0 && git push origin v0.2.0`), or
 run the workflow on `main` with a `version` input and it creates the tag. A `-`
 in the tag (`v0.2.0-rc1`) marks a prerelease. The macOS binaries are unsigned
-and not notarized: after a browser download, run
-`xattr -d com.apple.quarantine` on the extracted binaries.
+and not notarized.
 
 ## Scratching my itch
 
