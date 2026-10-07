@@ -134,6 +134,12 @@ jobs:
           cat ./*.sha256 > SHA256SUMS
           rm ./*.sha256
           ls -l
-          flags=(--target "$SHA" --title "$TAG" --generate-notes)
-          if [[ "$TAG" == *-* ]]; then flags+=(--prerelease); fi
-          gh release create "$TAG" "${flags[@]}" ./*.tar.gz SHA256SUMS
+          # A release created in the GitHub UI exists before this workflow
+          # finishes building, so attach to it if it is already there.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" --clobber ./*.tar.gz SHA256SUMS
+          else
+            flags=(--target "$SHA" --title "$TAG" --generate-notes)
+            if [[ "$TAG" == *-* ]]; then flags+=(--prerelease); fi
+            gh release create "$TAG" "${flags[@]}" ./*.tar.gz SHA256SUMS
+          fi
