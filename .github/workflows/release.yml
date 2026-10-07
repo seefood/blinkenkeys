@@ -23,7 +23,7 @@ concurrency:
 
 jobs:
   version:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     outputs:
       tag: ${{ steps.v.outputs.tag }}
     steps:
@@ -51,7 +51,7 @@ jobs:
 
   test:
     needs: version
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -68,8 +68,8 @@ jobs:
       matrix:
         include:
           # Linux is built on 22.04 so the binaries run on older glibc.
-          - { os: linux, arch: amd64, runner: ubuntu-22.04 }
-          - { os: linux, arch: arm64, runner: ubuntu-22.04-arm }
+          - { os: linux, arch: amd64, runner: ubuntu-latest }
+          - { os: linux, arch: arm64, runner: ubuntu-latest-arm }
           - { os: darwin, arch: arm64, runner: macos-15 }
           - { os: darwin, arch: amd64, runner: macos-15-intel }
     runs-on: ${{ matrix.runner }}
@@ -114,7 +114,7 @@ jobs:
 
   release:
     needs: [version, build]
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
