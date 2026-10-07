@@ -1,5 +1,9 @@
 # blinkenkeys
 
+[![release](https://img.shields.io/github/v/release/seefood/blinkenkeys)](https://github.com/seefood/blinkenkeys/releases/latest)
+[![release build](https://github.com/seefood/blinkenkeys/actions/workflows/release.yml/badge.svg)](https://github.com/seefood/blinkenkeys/actions/workflows/release.yml)
+[![license](https://img.shields.io/github/license/seefood/blinkenkeys)](LICENSE)
+
 **Turn keys on a programmable keyboard into status lights you define.** Point any
 script, hook or CI job at a key with one command and choose its color or
 animation, from a solid color to a timed multi-stage countdown. Works with any
