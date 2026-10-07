@@ -24,6 +24,9 @@ repos:
     rev: v2.13.2
     hooks:
       - id: golangci-lint
+        # prek otherwise builds it with the Go its own cache derived from the
+        # hook repo's go.mod (1.26), which golangci-lint refuses against our go.mod.
+        language_version: "1.27.1"
 
   - repo: https://github.com/shellcheck-py/shellcheck-py
     rev: v0.11.0.1
