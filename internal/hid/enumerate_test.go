@@ -27,3 +27,11 @@ func TestBaseName(t *testing.T) {
 		t.Errorf("BaseName(vid/pid only) = %q", got)
 	}
 }
+
+// go-hid panics ("illegal byte sequence") when enumerating a device whose
+// name has non-ASCII characters unless the C locale's LC_CTYPE is UTF-8.
+func TestLocaleAcceptsNonASCIIDeviceStrings(t *testing.T) {
+	if !wcstombsAcceptsNonASCII() {
+		t.Fatal("wcstombs rejects U+2019: LC_CTYPE is not a UTF-8 locale, go-hid enumeration will panic")
+	}
+}
