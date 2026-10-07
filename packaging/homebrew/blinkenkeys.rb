@@ -1,33 +1,28 @@
-# DRAFT, not yet tested with `brew install`/`brew audit`. Lives in this repo for
-# review; it belongs in the tap repo seefood/homebrew-blinkenkeys as
-# Formula/blinkenkeys.rb. VERSION and the four sha256 values must be filled from
-# a release's SHA256SUMS (a release job can automate this).
+# Template for the seefood/homebrew-blinkenkeys formula. The tap's
+# update-formula workflow fills VERSION and the SHA256_* values from the latest
+# release's SHA256SUMS; do not edit the tap's copy by hand.
 class Blinkenkeys < Formula
   desc "Daemon and CLI that drive per-key RGB on VialRGB keyboards"
   homepage "https://github.com/seefood/blinkenkeys"
-  version "VERSION" # e.g. "0.1.0" (release tag is v#{version})
   license "GPL-3.0-only" # README says "GPL-3.0"; confirm -only vs -or-later
 
-  base = "https://github.com/seefood/blinkenkeys/releases/download/v#{version}"
+  ver = "VERSION"
+  base = "https://github.com/seefood/blinkenkeys/releases/download/v#{ver}"
 
   on_macos do
     on_arm do
-      url "#{base}/blinkenkeys-v#{version}-darwin-arm64.tar.gz"
+      url "#{base}/blinkenkeys-v#{ver}-darwin-arm64.tar.gz"
       sha256 "SHA256_DARWIN_ARM64"
     end
     on_intel do
-      url "#{base}/blinkenkeys-v#{version}-darwin-amd64.tar.gz"
+      url "#{base}/blinkenkeys-v#{ver}-darwin-amd64.tar.gz"
       sha256 "SHA256_DARWIN_AMD64"
     end
   end
 
   on_linux do
-    on_arm do
-      url "#{base}/blinkenkeys-v#{version}-linux-arm64.tar.gz"
-      sha256 "SHA256_LINUX_ARM64"
-    end
     on_intel do
-      url "#{base}/blinkenkeys-v#{version}-linux-amd64.tar.gz"
+      url "#{base}/blinkenkeys-v#{ver}-linux-amd64.tar.gz"
       sha256 "SHA256_LINUX_AMD64"
     end
   end

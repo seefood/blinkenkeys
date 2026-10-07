@@ -18,6 +18,23 @@ also implemented, specced inline in Phase 3's "Named-key model" section; see
 
 ## Installation
 
+**Homebrew (macOS):** the tap installs the prebuilt release binaries
+(`blinkenkeysd` and `blincli`) and a login service:
+
+```bash
+brew tap seefood/blinkenkeys
+brew install blinkenkeys
+brew services start blinkenkeys
+```
+
+On first start the service seeds `~/.config/blinkenkeys` from the example
+config, only if `config.yaml` is not already there; an existing config is never
+overwritten. Check it with `blinkenkeysd --check-config`, and read the daemon
+log at `$(brew --prefix)/var/log/blinkenkeysd.log`. `blincli` lands in
+`$(brew --prefix)/bin`. The tap follows the latest non-prerelease GitHub release, checked daily.
+Linux raw-HID access needs a udev rule that Homebrew cannot install; on Linux
+use the release tarball below.
+
 **From a release tarball:** download the archive for your OS/arch and
 `SHA256SUMS` from the [releases page](https://github.com/seefood/blinkenkeys/releases),
 then verify, unpack and run the installer for your OS (below) from the
