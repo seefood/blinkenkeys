@@ -104,8 +104,10 @@ Order, first match wins:
    pid heuristics). `--if-detected` turns this into a silent exit 0.
 
 Remote transport: derived names/owners are prefixed with the short hostname
-(`laptop.wezterm-17`) so panes on different machines do not collide. Names must not contain
-`,` (it parses as `R,C`) or `/` (single path segment).
+(`laptop.wezterm-17`) so panes on different machines do not collide. An explicit `-n NAME` is
+used verbatim (never prefixed) by `set`, `clear` and `get` alike, so hosts can share a name on
+purpose. Names must not contain `,` (it parses as `R,C`) or `/` (single path segment), must not
+start with `led:`/`idx:` (direct addresses), and must not be `.` or `..`.
 
 ### Terminal resolvers (implement as many as feasible)
 
@@ -116,8 +118,8 @@ tmux panes).
 | Terminal | Tab number | Instance id (fallback name) | Status |
 |---|---|---|---|
 | tmux | `tmux display -p -t $TMUX_PANE '#{window_index}'` | `$TMUX_PANE` | verified (`window_index` and `base-index` both work) |
-| iTerm2 | `t` field of `$ITERM_SESSION_ID` (`w0t1p0:UUID`) | `w0t1p0` | zero-based (docs); the env var is fixed when the shell starts, so it goes **stale** after tab reorder/close (accepted limitation); `wNtN` repeats across windows |
-| WezTerm | tab position via `wezterm cli list --format json` | `$WEZTERM_PANE` (verified: monotonic mux-lifetime counter) | JSON shape verified (`window_id`, `tab_id`, `pane_id`); no tab-position field, so tab number = rank of `tab_id` in list order (ordering **[unverified]**) |
+| iTerm2 | `t` field of `$ITERM_SESSION_ID` (`w0t1p0:UUID`) | `w0t1p0` | zero-based (docs-verified); the env var is fixed when the shell starts, so it goes **stale** after tab reorder/close (accepted limitation); `wNtN` repeats across windows |
+| WezTerm | tab position via `wezterm cli list --format json` | `$WEZTERM_PANE` (verified: monotonic mux-lifetime counter) | JSON shape verified (`window_id`, `tab_id`, `pane_id`); no tab-position field, so tab number = rank of `tab_id` in list order (list order = tab order still **[unverified]**, manual check 3) |
 | kitty | `kitten @ ls` (needs remote control enabled) | `$KITTY_WINDOW_ID` | **[unverified]**; tab number likely skipped |
 
 The resolver table lives in `internal/termid` so adding a terminal is one entry. Resolvers that
@@ -134,7 +136,14 @@ Two sessions can map to one slot (tab 13 vs tab 1; `w0t0` vs `w1t0` in iTerm). P
 - A new write simply takes the key.
 - `clear` is conditional: the CLI sends its owner, the daemon blanks/releases only if the recorded
   owner still matches; otherwise a no-op, exit 0. `--force` clears unconditionally. A session
-  ending therefore never blanks a key another session has since taken.
+  ending therefore never blanks a key another session has since taken. The owner check and the
+  blank are atomic in the engine (`effects.Engine.ClearIfOwner`), so a racing write by another
+  owner is never blanked.
+- Decided limitation: status records are in-memory only. A conditional clear that finds **no**
+  record proceeds and blanks. After a daemon restart (records gone) a stale session's `clear`
+  therefore blanks the key even if another session lit it before the restart; the daemon does
+  not refuse record-less conditional clears. Rewriting a key after a restart restores the
+  protection.
 
 #### Direct write vs. named claim (`keys.collision`)
 
@@ -167,7 +176,8 @@ devices:
 
 Key lists accept single indexes and ranges combined, as a YAML list or one string:
 `[0-4, 6, 8-10]` or `"0-4,6,8-10"`. Order is preserved as written (it matters for `tabs`);
-a range ascends. `pool: []` means no pool (named claims always use shared placement).
+a range ascends. `pool: []` means no pool (named claims always use shared placement); a YAML
+null (`pool: ~`, `pool: null`, bare `pool:`) is the same as omitting `pool`.
 
 - Absent `keys:` keeps today's behavior (pool = every key with row >= 1; `tabs` unset, so the
   client falls back to idx 0..slots-1 with slots = 6). `keys:` present with `pool` omitted:
@@ -175,9 +185,14 @@ a range ascends. `pool: []` means no pool (named claims always use shared placem
 - The daemon enforces it: `nextUnclaimedLocked` only offers `pool` keys; writes the daemon
   receives for a key outside `tabs` and `pool` are still allowed (explicit `-k` always works).
 - `GET /devices/{name}` (capabilities) gains `layout: {tabs, pool}` so a remote `blincli`
-  needs no local layout config; `-m/--slots` and `slots:` only override.
-- Config validation: indexes must be unique across `tabs` and `pool`; `idx:` values beyond the
-  device's key count are rejected once capabilities are known.
+  needs no local layout config; `-m/--slots` and `slots:` only override. The full shape is
+  `layout: {tabs, pool, collision}`: `pool` is omitted for the default pool and `[]` when
+  configured empty; `collision` is always present (`last-wins` or `displace`).
+- Config validation: indexes must be unique across `tabs` and `pool`. `idx:` values beyond the
+  device's key count are **not** a hard validation (capabilities are unknown at config load):
+  out-of-range `pool` entries are skipped at claim time, and a tab-slot write to an out-of-range
+  index returns 404. Writes queued before capabilities are known (`applyPending`) always use
+  `last-wins`, even when `collision: displace` is set.
 
 ## `get` and the API enhancement
 
@@ -212,6 +227,8 @@ engine drops finished effects and never records the original request):
     "effect":{"name":"breathe_orange","running":true,"elapsed_ms":12400,"duration_ms":null},
     "claim":{"last_write":"...","expires_at":"..."}}
    ```
+   `effect.failed: true` (omitted otherwise) means the engine stopped the effect after a write
+   failed; `elapsed_ms` is then how far it got, not a normal finish.
 3. `GET /devices/{name}/keys` — array of the same for every registered key.
 4. `PUT /devices/{name}/keys/{pos}` — optional `owner` body field.
 5. `DELETE /devices/{name}/keys/{pos}` — extended to accept direct addresses (currently 400 for
@@ -221,7 +238,7 @@ engine drops finished effects and never records the original request):
 ## Exit codes (sysexits; none is 2 — Claude Code hooks treat exit 2 as blocking on `Stop`/`UserPromptSubmit`, verified)
 
 0 ok · 1 daemon returned an error · 64 usage / no key or device determinable · 66 key not
-registered · 69 daemon unreachable · 77 auth missing/rejected · 78 no config/endpoint.
+registered · 69 daemon unreachable · 77 auth missing/rejected · 78 no config/endpoint, or a malformed `blincli.yaml`.
 
 ## Files
 
@@ -229,7 +246,7 @@ registered · 69 daemon unreachable · 77 auth missing/rejected · 78 no config/
   table), plus the API/engine/dispatcher changes above.
 - `make build` also builds `bin/blincli`; both platforms' `install.sh` install `blincli`
   alongside the daemon.
-- `integrations/claude/hooks-blincli.json`: the five events of `hooks-basic.json` using
+- `integrations/claude/hooks-blincli.json`: the five events of `hooks-basic.json` using plain
   `blincli set -s claude/{idle,working,waiting}` and `blincli clear` (no `--if-detected`: inside
   Claude Code `$CLAUDE_CODE_SESSION_ID` is always set, so a real misconfiguration should surface
   as a non-blocking hook error).

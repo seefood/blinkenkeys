@@ -27,7 +27,33 @@ type fakeDispatcher struct {
 	capsErr    error
 	releaseErr error
 	released   []string // device+"/"+name for each ReleaseClaim call
+	lookupErr  error
+	moved      *dispatcher.Moved // returned by Place
+	onPlace    func()
+	lookupAddr *keyaddr.Address // if set, Lookup returns this instead of echoing the address
+
+	info         dispatcher.KeyInfo
+	curColor     *color.HSV
+	layout       dispatcher.Layout
+	disconnected bool
+	canonCalls   int // Canonical claims/marks as a side effect; read paths must leave this 0
+	owned        []uint16
+	infoCalls    int
 }
+
+func (f *fakeDispatcher) KeyInfo(string, uint16) dispatcher.KeyInfo {
+	f.infoCalls++
+	return f.info
+}
+func (f *fakeDispatcher) OwnedLEDs(string) []uint16 { return f.owned }
+func (f *fakeDispatcher) CurrentColor(string, uint16) (color.HSV, bool) {
+	if f.curColor == nil {
+		return color.HSV{}, false
+	}
+	return *f.curColor, true
+}
+func (f *fakeDispatcher) Layout(string) dispatcher.Layout { return f.layout }
+func (f *fakeDispatcher) Connected(string) bool           { return !f.disconnected }
 
 func (f *fakeDispatcher) ResolveDevice(ref string) (string, bool) {
 	name, ok := f.devices[ref]
@@ -35,10 +61,19 @@ func (f *fakeDispatcher) ResolveDevice(ref string) (string, bool) {
 }
 
 func (f *fakeDispatcher) Canonical(_ context.Context, _ string, a keyaddr.Address) (keyaddr.Address, error) {
+	f.canonCalls++
 	if f.canonErr != nil {
 		return keyaddr.Address{}, f.canonErr
 	}
 	return a, nil
+}
+
+func (f *fakeDispatcher) Place(ctx context.Context, device string, a keyaddr.Address) (keyaddr.Address, *dispatcher.Moved, error) {
+	if f.onPlace != nil {
+		f.onPlace()
+	}
+	a, err := f.Canonical(ctx, device, a)
+	return a, f.moved, err
 }
 
 func (f *fakeDispatcher) ListDevices(context.Context) ([]dispatcher.DeviceSummary, error) {
@@ -54,12 +89,24 @@ func (f *fakeDispatcher) ReleaseClaim(device, name string) error {
 	return f.releaseErr
 }
 
+func (f *fakeDispatcher) Lookup(_ context.Context, _ string, a keyaddr.Address) (keyaddr.Address, error) {
+	if f.lookupErr != nil {
+		return keyaddr.Address{}, f.lookupErr
+	}
+	if f.lookupAddr != nil {
+		return *f.lookupAddr, nil
+	}
+	return a, nil
+}
+
 type fakeWriter struct {
-	colors []effects.Target
-	gotHSV []color.HSV
-	starts []effects.Target
-	gotTL  []*effects.Timeline
-	err    error
+	colors  []effects.Target
+	gotHSV  []color.HSV
+	starts  []effects.Target
+	gotTL   []*effects.Timeline
+	origins []effects.Origin // origin of each SetColorFrom/StartFrom call
+	status  map[effects.Target]effects.Status
+	err     error
 }
 
 func (f *fakeWriter) SetColor(t effects.Target, c color.HSV) error {
@@ -67,9 +114,43 @@ func (f *fakeWriter) SetColor(t effects.Target, c color.HSV) error {
 	return f.err
 }
 
-func (f *fakeWriter) Start(t effects.Target, tl *effects.Timeline, _ time.Time) error {
+// ClearIfOwner mirrors effects.Engine.ClearIfOwner over f.status; a clear is
+// recorded as a SetColor to black.
+func (f *fakeWriter) ClearIfOwner(t effects.Target, owner string) (bool, error) {
+	if st, ok := f.status[t]; ok && st.Origin.Owner != owner {
+		return false, nil
+	}
+	if err := f.SetColor(t, color.HSV{}); err != nil {
+		return false, err
+	}
+	delete(f.status, t)
+	return true, nil
+}
+
+func (f *fakeWriter) SetColorFrom(t effects.Target, c color.HSV, o effects.Origin, _ time.Time) error {
+	f.origins = append(f.origins, o)
+	return f.SetColor(t, c)
+}
+
+func (f *fakeWriter) StartFrom(t effects.Target, tl *effects.Timeline, _ time.Time, o effects.Origin) error {
+	f.origins = append(f.origins, o)
 	f.starts, f.gotTL = append(f.starts, t), append(f.gotTL, tl)
 	return f.err
+}
+
+func (f *fakeWriter) Status(t effects.Target, _ time.Time) (effects.Status, bool) {
+	st, ok := f.status[t]
+	return st, ok
+}
+
+func (f *fakeWriter) Statuses(device string, _ time.Time) map[effects.Target]effects.Status {
+	out := map[effects.Target]effects.Status{}
+	for t, st := range f.status {
+		if t.Device == device {
+			out[t] = st
+		}
+	}
+	return out
 }
 
 type fakeLibrary struct {
@@ -227,8 +308,9 @@ func TestDeleteStatusTable(t *testing.T) {
 		want int
 	}{
 		{"unknown device", knownPad(), "/devices/nope/keys/esc", 404},
-		{"direct address not a name", knownPad(), "/devices/0/keys/2,2", 400},
+		{"direct address now blanks", knownPad(), "/devices/0/keys/2,2", 204},
 		{"malformed pos", knownPad(), "/devices/0/keys/1,x", 400},
+		{"unclaimed name", &fakeDispatcher{devices: map[string]string{"0": "a"}, lookupErr: dispatcher.ErrClaimNotFound}, "/devices/0/keys/esc", 404},
 		{"no claim under that name", &fakeDispatcher{devices: map[string]string{"0": "a"}, releaseErr: dispatcher.ErrClaimNotFound}, "/devices/0/keys/esc", 404},
 	}
 	for _, tt := range tests {
@@ -244,5 +326,107 @@ func TestUnknownEffectBodyListsKnown(t *testing.T) {
 	rec := put(t, NewHandler(knownPad(), &fakeWriter{}, lib, nil), "/devices/0/keys/0,0", `{"effect":"x"}`)
 	if !strings.Contains(rec.Body.String(), "timer5min") {
 		t.Errorf("body %s does not list known effects", rec.Body)
+	}
+}
+
+func TestPutRecordsOriginAndOwner(t *testing.T) {
+	w := &fakeWriter{}
+	h := NewHandler(knownPad(), w, &fakeLibrary{tl: &effects.Timeline{}}, nil)
+	if rec := put(t, h, "/devices/0/keys/idx:1", `{"color":"red","owner":"laptop.iterm-ab12"}`); rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d; %s", rec.Code, rec.Body)
+	}
+	if rec := put(t, h, "/devices/0/keys/idx:1", `{"effect":"timer5min"}`); rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	want := []effects.Origin{
+		{Type: "color", Ref: "red", Owner: "laptop.iterm-ab12"},
+		{Type: "effect", Ref: "timer5min"},
+	}
+	if len(w.origins) != 2 || w.origins[0] != want[0] || w.origins[1] != want[1] {
+		t.Errorf("origins = %+v, want %+v", w.origins, want)
+	}
+}
+
+func TestPutRejectsBadOwner(t *testing.T) {
+	h := NewHandler(knownPad(), &fakeWriter{}, &fakeLibrary{}, nil)
+	for _, body := range []string{`{"color":"red","owner":""}`, `{"color":"red","owner":"` + strings.Repeat("x", 129) + `"}`} {
+		if rec := put(t, h, "/devices/0/keys/0,0", body); rec.Code != 400 {
+			t.Errorf("%.40s: status = %d, want 400", body, rec.Code)
+		}
+	}
+	// owner alone is not a write
+	if rec := put(t, h, "/devices/0/keys/0,0", `{"owner":"x"}`); rec.Code != 400 {
+		t.Errorf("owner-only body: status = %d, want 400", rec.Code)
+	}
+}
+
+func TestDeleteDirectAddressBlanks(t *testing.T) {
+	disp := knownPad()
+	led := keyaddr.Address{Kind: keyaddr.LED, N: 3}
+	disp.lookupAddr = &led
+	w := &fakeWriter{}
+	rec := del(t, NewHandler(disp, w, &fakeLibrary{}, nil), "/devices/0/keys/idx:3")
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d; %s", rec.Code, rec.Body)
+	}
+	want := effects.Target{Device: "uid-01", Addr: led}
+	if len(w.colors) != 1 || w.colors[0] != want || w.gotHSV[0] != (color.HSV{}) {
+		t.Errorf("SetColor = %+v %+v", w.colors, w.gotHSV)
+	}
+	if len(disp.released) != 0 {
+		t.Errorf("direct key has no claim to release, got %v", disp.released)
+	}
+}
+
+func TestDeleteOwnerMismatchIsNoOp(t *testing.T) {
+	disp := knownPad()
+	led := keyaddr.Address{Kind: keyaddr.LED, N: 3}
+	disp.lookupAddr = &led
+	target := effects.Target{Device: "uid-01", Addr: led}
+	w := &fakeWriter{status: map[effects.Target]effects.Status{target: {Origin: effects.Origin{Owner: "other"}}}}
+	h := NewHandler(disp, w, &fakeLibrary{}, nil)
+
+	if rec := del(t, h, "/devices/0/keys/idx:3?owner=mine"); rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if len(w.colors) != 0 || len(disp.released) != 0 {
+		t.Errorf("mismatched owner must not blank or release: %+v %v", w.colors, disp.released)
+	}
+	if rec := del(t, h, "/devices/0/keys/idx:3?owner=other"); rec.Code != http.StatusNoContent || len(w.colors) != 1 {
+		t.Errorf("matching owner must blank: status %d, colors %+v", rec.Code, w.colors)
+	}
+	w.colors = nil
+	if rec := del(t, h, "/devices/0/keys/idx:3"); rec.Code != http.StatusNoContent || len(w.colors) != 1 {
+		t.Errorf("no owner param must blank unconditionally: status %d", rec.Code)
+	}
+}
+
+func TestDeleteOwnerWithNoRecordProceeds(t *testing.T) {
+	disp := knownPad()
+	w := &fakeWriter{}
+	if rec := del(t, NewHandler(disp, w, &fakeLibrary{}, nil), "/devices/0/keys/esc?owner=mine"); rec.Code != 204 || len(disp.released) != 1 {
+		t.Errorf("status %d, released %v", rec.Code, disp.released)
+	}
+}
+
+func TestDeleteBlankFailureSkipsRelease(t *testing.T) {
+	disp := knownPad()
+	w := &fakeWriter{err: errors.New("queue full")}
+	rec := del(t, NewHandler(disp, w, &fakeLibrary{}, nil), "/devices/0/keys/esc")
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want 503; %s", rec.Code, rec.Body)
+	}
+	if len(disp.released) != 0 {
+		t.Errorf("claim must not be released when blank failed, got %v", disp.released)
+	}
+}
+
+func TestDeleteOwnerWithEmptyOwnerRecordIsNoOp(t *testing.T) {
+	disp := knownPad()
+	target := effects.Target{Device: "uid-01", Addr: keyaddr.Address{Kind: keyaddr.Name, Name: "esc"}}
+	w := &fakeWriter{status: map[effects.Target]effects.Status{target: {}}}
+	rec := del(t, NewHandler(disp, w, &fakeLibrary{}, nil), "/devices/0/keys/esc?owner=mine")
+	if rec.Code != http.StatusNoContent || len(w.colors) != 0 || len(disp.released) != 0 {
+		t.Errorf("status %d colors %v released %v", rec.Code, w.colors, disp.released)
 	}
 }

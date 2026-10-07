@@ -45,6 +45,19 @@ if [[ "$FORCE" -eq 1 ]] || ! cmp -s "$SRC_BIN" "$DEST_BIN" 2>/dev/null; then
 	bin_changed=1
 fi
 
+SRC_CLI="$SCRIPT_DIR/../../bin/blincli"
+if [[ ! -f "$SRC_CLI" ]]; then
+	echo "error: $SRC_CLI not found — run 'make build' first" >&2
+	exit 1
+fi
+
+DEST_CLI="$BIN_DIR/blincli"
+cli_changed=0
+if [[ "$FORCE" -eq 1 ]] || ! cmp -s "$SRC_CLI" "$DEST_CLI" 2>/dev/null; then
+	install -m 0755 "$SRC_CLI" "$DEST_CLI"
+	cli_changed=1
+fi
+
 if [[ ! -f "$CONFIG_DIR/config.yaml" ]]; then
 	mkdir -p "$CONFIG_DIR/templates" "$CONFIG_DIR/effects"
 	cp "$SRC_CONFIG/config.yaml" "$CONFIG_DIR/config.yaml"
@@ -87,6 +100,7 @@ fi
 
 echo
 echo "binary:    $([[ $bin_changed -eq 1 ]] && echo "installed to $DEST_BIN" || echo "already up to date")"
+echo "cli:       $([[ $cli_changed -eq 1 ]] && echo "installed to $DEST_CLI" || echo "already up to date")"
 echo "config:    $([[ $config_seeded -eq 1 ]] && echo "seeded default config at $CONFIG_DIR" || echo "already present, left untouched")"
 echo "unit:      $([[ $unit_changed -eq 1 ]] && echo "installed to $DEST_UNIT" || echo "already up to date")"
 echo "udev rule: $([[ $rule_changed -eq 1 ]] && echo "installed to $RULES_DEST" || echo "already up to date")"

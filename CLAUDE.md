@@ -21,7 +21,7 @@ is Go, following the package layout in the design spec (`cmd/blinkenkeysd/`,
 ## Commands
 
 ```
-make build                        # builds bin/blinkenkeysd
+make build                        # builds bin/blinkenkeysd and bin/blincli
 make test                         # go test ./...
 make lint                         # prek run --all-files
 ```
@@ -82,3 +82,4 @@ design while implementing.)
 - **Bearer token is optional on the Unix-socket listener, mandatory on the TCP
   listener** (not user-configurable to disable) — filesystem permissions provide the
   access control on the socket; nothing does on the network.
+- **`blincli` is a pure-Go client** (`cmd/blincli`, `internal/client`, `internal/termid`): it must never import `internal/hid`/`dispatcher`/`effects`/`api` (cgo). Exit codes are sysexits and never 2 (Claude Code hooks treat 2 as blocking).

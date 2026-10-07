@@ -18,11 +18,25 @@ also implemented, specced inline in Phase 3's "Named-key model" section; see
 
 ## Installation
 
-Requires Go 1.27+, a C compiler (cgo), and on Linux the `libudev-dev`
-headers. Build the binary first:
+**From a release tarball:** download the archive for your OS/arch and
+`SHA256SUMS` from the [releases page](https://github.com/seefood/blinkenkeys/releases),
+then verify, unpack and run the installer for your OS (below) from the
+extracted directory:
 
 ```bash
-make build   # produces bin/blinkenkeysd
+sha256sum -c --ignore-missing SHA256SUMS   # macOS: shasum -a 256 -c --ignore-missing SHA256SUMS
+tar xzf blinkenkeys-vX.Y.Z-<os>-<arch>.tar.gz
+cd blinkenkeys-vX.Y.Z-<os>-<arch>
+```
+
+macOS binaries are unsigned: after a browser download, run
+`xattr -dr com.apple.quarantine .` in the extracted directory first.
+
+**From source:** requires Go 1.27+, a C compiler (cgo), and on Linux the
+`libudev-dev` headers. Build the binary first:
+
+```bash
+make build   # produces bin/blinkenkeysd and bin/blincli
 ```
 
 **Linux:** `packaging/linux/install.sh` installs the binary, a udev rule
@@ -64,6 +78,24 @@ touching your `~/.config/blinkenkeys/` config or
 `~/.local/state/blinkenkeys/` runtime data. See
 [`docs/superpowers/manual-checks/phase2-5-macos-install.md`](docs/superpowers/manual-checks/phase2-5-macos-install.md)
 for the full install/uninstall verification checklist.
+
+## blincli
+
+`blincli` is a small pure-Go client for the daemon's API; it finds the
+daemon, picks a key from your terminal tab, and is what Claude Code hooks
+call:
+
+```bash
+blincli set -s claude/idle   # state on this terminal's key
+blincli get                  # what is on this key, and for how long
+```
+
+`make build` produces it as `bin/blincli` and the installers put it next to
+`blinkenkeysd`. Each device can declare a key layout (`keys.tabs` for terminal
+tab slots, `keys.pool` for named claims) and a `keys.collision` policy:
+`last-wins` (default) or `displace`. See
+[`integrations/claude/README.md`](integrations/claude/README.md) and the
+[design spec](docs/superpowers/specs/2026-10-05-blincli-design.md).
 
 ## Scratching my itch
 
@@ -119,13 +151,13 @@ I'm planning to add templates to suport all sorts of use cases, please add your 
    lives in the effect/template schema and what's allowed to trigger it
    (security-sensitive: this is arbitrary command execution, so it needs a
    real opt-in, not just a config field).
-8. **Friendly CLI** — future work, not yet designed. A small wrapper that
+8. **Friendly CLI** — initial version included. A wrapper that
    encapsulates pane detection (see item 5's WezTerm/iTerm correlation) in
    user-facing terms instead of raw `R,C` math, reads the bearer token from
    the daemon's own config so the user doesn't have to, and calls `curl`
    against the socket/TCP listener in the background on the user's behalf.
 
-Windows support is an open question intentionally left for a future community PR —
+Windows support is an open question intentionally left for a future community PR, since I don't have windows machines available, so this is
 not being built or tested here.
 
 ## Networking
@@ -140,7 +172,7 @@ since filesystem permissions no longer provide the access control. Plain HTTP + 
 is the accepted threat model for now (LAN/trusted-network use); SSH port forwarding
 is the documented escape hatch if stronger transport security is ever needed, rather
 than adding TLS to `blinkenkeysd` itself. If you feel good about running an open
-daemon on your LAN and let any of your coworkers changing your key colours,
+daemon on your LAN and let any of your cow orkers changing your key colours,
 feel free to patch it, but I don't condone it :)
 
 See

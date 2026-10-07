@@ -83,8 +83,9 @@ type ReconcileResult struct {
 // across polls so a device that disconnects doesn't lose its name or cached
 // colors immediately — see Reconcile.
 type Registry struct {
-	mu    sync.Mutex
-	slots map[string]*slot
+	mu      sync.Mutex
+	slots   map[string]*slot
+	layouts map[string]Layout // device name -> key roles; see SetLayout
 }
 
 // NewRegistry creates an empty Registry.
@@ -215,7 +216,7 @@ func (r *Registry) SetCaps(name string, caps Capabilities, apply func(idx uint16
 	s.caps = &caps
 	now := time.Now()
 	for _, w := range s.pending {
-		idx, err := resolveLocked(s, w.Addr, now)
+		idx, err := resolveLocked(s, r.layoutLocked(name), w.Addr, now)
 		if err != nil {
 			if dropped != nil {
 				dropped(w, err)

@@ -1,0 +1,140 @@
+name: release
+
+# Two ways to cut a release:
+#   - push a tag matching v*            (e.g. `git tag v0.2.0 && git push origin v0.2.0`)
+#   - run this workflow by hand on main with a `version` input; the release step
+#     creates the tag at the built commit.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release tag to create, e.g. v0.2.0 (or v0.2.0-rc1 for a prerelease)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.event.inputs.version || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.v.outputs.tag }}
+    steps:
+      - id: v
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+          REF_NAME: ${{ github.ref_name }}
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+        run: |
+          if [[ "$EVENT" == "workflow_dispatch" ]]; then
+            tag="$INPUT_VERSION"
+            if [[ "$REF" != "refs/heads/main" ]]; then
+              echo "::error::manual releases must run on main (got $REF)"
+              exit 1
+            fi
+          else
+            tag="$REF_NAME"
+          fi
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::'$tag' is not a version tag like v1.2.3 or v1.2.3-rc1"
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+  test:
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Install libudev headers (hidraw backend)
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev
+      - run: go test ./...
+
+  build:
+    needs: [version, test]
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          # Linux is built on 22.04 so the binaries run on older glibc.
+          - { os: linux, arch: amd64, runner: ubuntu-latest }
+          - { os: linux, arch: arm64, runner: ubuntu-latest-arm }
+          - { os: darwin, arch: arm64, runner: macos-15 }
+          - { os: darwin, arch: amd64, runner: macos-15-intel }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Install libudev headers (hidraw backend)
+        if: matrix.os == 'linux'
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev
+      - name: Build and package
+        env:
+          TAG: ${{ needs.version.outputs.tag }}
+          GOOS_NAME: ${{ matrix.os }}
+          GOARCH_NAME: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          name="blinkenkeys-${TAG}-${GOOS_NAME}-${GOARCH_NAME}"
+          pkgdir="$(if [[ "$GOOS_NAME" == darwin ]]; then echo macos; else echo linux; fi)"
+
+          # blinkenkeysd links hidapi through cgo, so it is built natively per
+          # platform. blincli is pure Go.
+          make build VERSION="$TAG"
+
+          mkdir -p "dist/$name/bin" "dist/$name/packaging" "dist/$name/examples"
+          cp bin/blinkenkeysd bin/blincli "dist/$name/bin/"
+          cp -R "packaging/$pkgdir" "dist/$name/packaging/$pkgdir"
+          cp -R examples/config "dist/$name/examples/config"
+          cp README.md LICENSE CHANGELOG.md "dist/$name/"
+          cp -R integrations "dist/$name/integrations"
+
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          (cd dist && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256")
+      - uses: actions/upload-artifact@v7
+        with:
+          name: pkg-${{ matrix.os }}-${{ matrix.arch }}
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+          if-no-files-found: error
+
+  release:
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          pattern: pkg-*
+          merge-multiple: true
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.version.outputs.tag }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          cd dist
+          cat ./*.sha256 > SHA256SUMS
+          rm ./*.sha256
+          ls -l
+          flags=(--target "$SHA" --title "$TAG" --generate-notes)
+          if [[ "$TAG" == *-* ]]; then flags+=(--prerelease); fi
+          gh release create "$TAG" "${flags[@]}" ./*.tar.gz SHA256SUMS

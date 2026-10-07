@@ -3,19 +3,119 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/seefood/blinkenkeys/config"
 	"github.com/seefood/blinkenkeys/internal/dispatcher"
+	"github.com/seefood/blinkenkeys/internal/effects"
 	"github.com/seefood/blinkenkeys/internal/hid"
 )
+
+func TestLayoutFor(t *testing.T) {
+	if _, ok := layoutFor(config.DeviceDecl{ID: "a"}); ok {
+		t.Error("device without keys: must report no layout")
+	}
+	l, ok := layoutFor(config.DeviceDecl{ID: "a", Keys: &config.KeyLayout{Tabs: config.KeyList{0, 1}, Pool: config.KeyList{6}}})
+	if !ok || l.DefaultPool || !reflect.DeepEqual(l.Tabs, []uint16{0, 1}) || !reflect.DeepEqual(l.Pool, []uint16{6}) {
+		t.Errorf("explicit pool: %+v, %v", l, ok)
+	}
+	l, _ = layoutFor(config.DeviceDecl{ID: "a", Keys: &config.KeyLayout{Tabs: config.KeyList{0}}})
+	if !l.DefaultPool {
+		t.Errorf("omitted pool must give DefaultPool: %+v", l)
+	}
+	l, _ = layoutFor(config.DeviceDecl{ID: "a", Keys: &config.KeyLayout{Pool: config.KeyList{}}})
+	if l.DefaultPool || len(l.Pool) != 0 {
+		t.Errorf("explicit empty pool must not be DefaultPool: %+v", l)
+	}
+	l, _ = layoutFor(config.DeviceDecl{ID: "a", Keys: &config.KeyLayout{Collision: "displace"}})
+	if !l.Displace {
+		t.Errorf("collision: displace must set Displace: %+v", l)
+	}
+	if l, _ = layoutFor(config.DeviceDecl{ID: "a", Keys: &config.KeyLayout{Tabs: config.KeyList{0}}}); l.Displace {
+		t.Error("collision omitted must not displace")
+	}
+}
+
+func TestDeclareDevicesAppliesLayout(t *testing.T) {
+	registry := dispatcher.NewRegistry()
+	declareDevices(registry, []config.DeviceDecl{
+		{ID: "a", Optional: true, Keys: &config.KeyLayout{Tabs: config.KeyList{0, 1}, Pool: config.KeyList{6}, Collision: "displace"}},
+		{ID: "b"},
+	})
+	l := registry.Layout("a")
+	if !reflect.DeepEqual(l.Tabs, []uint16{0, 1}) || !reflect.DeepEqual(l.Pool, []uint16{6}) || !l.Displace {
+		t.Errorf("layout a = %+v", l)
+	}
+	if got := registry.Layout("b"); !reflect.DeepEqual(got, registry.Layout("unconfigured")) {
+		t.Errorf("device without keys: layout = %+v, want the default", got)
+	}
+}
+
+func TestLoadAllValidatesKeysSection(t *testing.T) {
+	dir := t.TempDir()
+	write := func(yaml string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(yaml), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("devices:\n  - id: a\n    keys: {tabs: [0-5], pool: [6-11], collision: displace}\n")
+	if _, _, err := loadAll(dir); err != nil {
+		t.Errorf("valid keys section rejected: %v", err)
+	}
+	write("devices:\n  - id: a\n    keys: {collision: bogus}\n")
+	if _, _, err := loadAll(dir); err == nil {
+		t.Error("bad collision value accepted")
+	}
+}
+
+func TestNewAPIHandlerUsesConfiguredClaimTimeout(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+	registry := dispatcher.NewRegistry()
+	disp := dispatcher.New(registry, dispatcher.NewCache(), 8, logger)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go disp.Run(ctx)
+
+	id := hid.Identity{HasUID: true, UID: [8]byte{1}}
+	registry.Reconcile([]dispatcher.PresentDevice{{Identity: id, Ctrl: stubController{}}}, time.Now(), dispatcher.UntetheredMaxAge)
+	dev := hid.BaseName(id)
+	declareDevices(registry, []config.DeviceDecl{{ID: dev, Keys: &config.KeyLayout{Pool: config.KeyList{0}}}})
+	syncDevices(ctx, registry, disp, nil, logger)
+	last := time.Now().Add(-time.Hour)
+	if _, err := registry.ClaimOrGet(dev, "n1", last); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.Config{Claims: config.ClaimsConfig{IdleTimeout: "2h"}}
+	h := newAPIHandler(disp, effects.NewEngine(disp, logger), &effects.Library{}, cfg, logger)
+	rec := httptest.NewRecorder()
+	h.Routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/devices/"+dev+"/keys/n1", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; %s", rec.Code, rec.Body)
+	}
+	var v struct {
+		Claim struct {
+			ExpiresAt time.Time `json:"expires_at"`
+		}
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &v); err != nil {
+		t.Fatal(err)
+	}
+	if want := last.Add(2 * time.Hour); v.Claim.ExpiresAt.Sub(want).Abs() > time.Second {
+		t.Errorf("expires_at = %v, want ~%v (configured 2h, not default 8h)", v.Claim.ExpiresAt, want)
+	}
+}
 
 func TestWarnIfRootFallback_NonLinux(t *testing.T) {
 	var buf bytes.Buffer

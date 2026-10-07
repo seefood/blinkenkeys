@@ -53,3 +53,30 @@ func TestParseHSV(t *testing.T) {
 		t.Error("ParseHSV(not-a-color): want error")
 	}
 }
+
+func TestHSVHex(t *testing.T) {
+	tests := []struct {
+		in   HSV
+		want string
+	}{
+		{HSV{H: 0, S: 255, V: 255}, "#ff0000"},
+		{HSV{H: 0, S: 0, V: 255}, "#ffffff"},
+		{HSV{H: 123, S: 77, V: 0}, "#000000"},
+		{HSV{H: 0, S: 0, V: 128}, "#808080"},
+		// Hue regions (H/43) 0-5, values hand-computed from QMK's integer
+		// hsv_to_rgb: region 0 mid-way, then each region's start, then H=255.
+		{HSV{H: 21, S: 255, V: 255}, "#ff7e00"},
+		{HSV{H: 43, S: 255, V: 255}, "#feff00"},
+		{HSV{H: 86, S: 255, V: 255}, "#00ff00"},
+		{HSV{H: 129, S: 255, V: 255}, "#00feff"},
+		{HSV{H: 172, S: 255, V: 255}, "#0000ff"},
+		{HSV{H: 215, S: 255, V: 255}, "#ff00fe"},
+		{HSV{H: 255, S: 255, V: 255}, "#ff000f"},
+		{HSV{H: 86, S: 255, V: 128}, "#008000"},
+	}
+	for _, tt := range tests {
+		if got := tt.in.Hex(); got != tt.want {
+			t.Errorf("%+v.Hex() = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
