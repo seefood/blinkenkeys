@@ -1,20 +1,65 @@
 # blinkenkeys
 
-A REST-controllable daemon that drives per-key RGB status indicators on Vial-based
-mechanical keyboards, using VialRGB's "Direct" mode (host-controlled, RAM-only LED
-colors, independent of the Vial app). Developed against the `cxt_studio/12e4` macropad -
-[see this gist](https://gist.github.com/seefood/013529d4c17f449a09ff50a7bb596ad2)
-for how that board's firmware got Vial + VialRGB support in the
-first place — but designed to generalize to any VialRGB-capable device.
+**Turn keys on a programmable keyboard into status lights you define.** Point any
+script, hook or CI job at a key with one command and choose its color or
+animation, from a solid color to a timed multi-stage countdown. Works with any
+VialRGB keyboard.
 
-## Status
+*My own use: one key per Claude Code terminal tab, breathing while Claude works
+and counting down the 5-minute prompt-cache window once it goes idle.*
 
-Language/implementation: **Go**. Specs:
-[Phases 1–2](docs/superpowers/specs/2026-09-21-blinkenkeys-phase1-2-design.md) (POC → MVP)
-and [Phase 3](docs/superpowers/specs/2026-09-24-blinkenkeys-phase3-effects-templates-design.md)
-(effects, templates, server-owned timers). Phase 5 (per-client key allocation) is
-also implemented, specced inline in Phase 3's "Named-key model" section; see
-`CHANGELOG.md` for design revisions.
+<!-- TODO: intro/demo video goes here -->
+
+## Why
+
+I got this keypad thinking I would use the encoders as jog wheels for video editing.
+In the years since I have been doing less editing and I forgot about it,
+and now a year after Claude Code entered my life I found the need for a nice state indicator.
+The current selection on the market is little menu-bar indicators and iTerm integrations
+that work only for local Claude terminals (I use it often via ssh) and they only show "working" or idle.
+
+I want to know a very important parameter, [is my cache still valid?](https://gist.github.com/seefood/aa1cb93be7977f29373e8a856b5e94c0).
+I work with the $20-level Claude subscription, so the cache TTL is 5 minutes. I want to see
+a 5 minute timer start the minute I hit "idle" and give me an indication if
+I should rush to enter the next prompt at 10% price, or if I overslept and it's now
+the 125% penalty and I can sit back and relax.
+
+Rather than just solving my own problem, I decided to build a general purpose tool.
+Add your own templates for other use cases via PR!
+
+## Quick start
+
+On macOS:
+
+```bash
+brew tap seefood/blinkenkeys
+brew install blinkenkeys
+brew services start blinkenkeys
+blincli set -s claude/idle   # state on this terminal's key
+```
+
+The service seeds `~/.config/blinkenkeys` from the example config on first
+start. You will likely need to edit its `devices:` entry to match your own
+board. Linux and other install routes are under [Installation](#installation).
+
+## Make it yours
+
+`blinkenkeysd` is a small daemon that owns the keyboard's LEDs; everything that
+decides what a key looks like is YAML in `~/.config/blinkenkeys/`:
+
+- **Effects** (`effects/*.yaml`): timelines of stages built from `breathe`,
+  `blink` and `alternate` primitives or flat colors. A stage with a duration
+  makes the countdown run entirely server-side: one "went idle" call, and the
+  key animates by itself afterwards.
+- **Templates** (`templates/*.yaml`): name your own states and map each to a
+  color or an effect, then set them with `blincli set -s <program>/<state>` or
+  the REST API.
+
+The bundled `claude/*` states are just one example set, shaped for my Claude
+Code setup. Define whatever colors and animations suit your own integrations.
+The schema reference and ready-to-copy samples are in
+[`examples/config/`](examples/config/README.md), and
+[`integrations/`](integrations/) has hook examples.
 
 ## Installation
 
@@ -114,22 +159,51 @@ tab slots, `keys.pool` for named claims) and a `keys.collision` policy:
 [`integrations/claude/README.md`](integrations/claude/README.md) and the
 [design spec](docs/superpowers/specs/2026-10-05-blincli-design.md).
 
-## Scratching my itch
+## Networking
 
-I got this keypad thinking I will use it with the encoders as jog wheels for video editing.
-in the years since I got it I have been doing less editing and I forgot about it,
-and now a year after ClaudeCode entered my life I found the need for a nice state indicator.
-current selection on the market are little menu-bar indicators and iTerm integrations
-that work only for local Claude terminals (I use it often via ssh) and they only show "working" or idle.
+`blinkenkeysd` always binds a `$HOME`-owned Unix domain socket (mode `0600`) for
+local clients — reachable elegantly from shell/curl via `curl --unix-socket <path>
+http://localhost/...` (supported natively since curl 7.40, no extra tooling needed).
+It can *optionally* also bind a TCP listener (default `:49994`; e.g. for reaching the
+daemon from a remote SSH session or server back to the machine the keyboard is physically
+attached to) — when TCP is enabled, a bearer token is mandatory (not just optional),
+since filesystem permissions no longer provide the access control. Plain HTTP + token
+is the accepted threat model for now (LAN/trusted-network use); SSH port forwarding
+is the documented escape hatch if stronger transport security is ever needed, rather
+than adding TLS to `blinkenkeysd` itself. If you feel good about running an open
+daemon on your LAN and let any of your cow orkers changing your key colours,
+feel free to patch it, but I don't condone it :)
 
-I want to know a very important parameter, [is my cache still valid?](https://gist.github.com/seefood/aa1cb93be7977f29373e8a856b5e94c0).
-I work with the $20-level Claude subscription, so the cache TTL is 5 minutes. I to see
-a 5 minute timer start the minute I hit "idle" and give me an indication if
-I should rush to enter the next prompt at 10% price, or if I overslept and it's now
-the 125% penalty and I can sit back and relax.
+See
+[`docs/superpowers/manual-checks/tcp-listener.md`](docs/superpowers/manual-checks/tcp-listener.md)
+for the TCP listener's manual verification checklist.
 
-Rather than just solving my own problem, I decided to build a general purpose tool.
-I'm planning to add templates to suport all sorts of use cases, please add your own via PR!
+## Known limitations
+
+`blinkenkeysd` opens the device's raw-HID interface exclusively, the same way Vial's
+own GUI does — only one process can hold that handle at a time. Running `blinkenkeysd`
+and Vial (or `set_key_color.py`, or any other tool talking to the same interface)
+against the same device simultaneously doesn't work; whichever opened it first keeps
+it, and the other fails to open the device until the first one releases it.
+
+To free the device for Vial without uninstalling the service:
+
+- **Linux:** `systemctl --user stop blinkenkeysd.service`, then
+  `systemctl --user start blinkenkeysd.service` (or just
+  `packaging/linux/install.sh`) when you're done.
+- **macOS:** `launchctl bootout "gui/$(id -u)/com.seefood.blinkenkeysd"`, then
+  `launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.seefood.blinkenkeysd.plist`
+  (or just `packaging/macos/install.sh`) when you're done. Note `bootout` only
+  stops it for the current login session — since the LaunchAgent has
+  `RunAtLoad`, it comes back automatically on your next login/reboot.
+
+VialRGB Direct-mode colors (`g_direct_mode_colors`) live in RAM only and are lost on
+any firmware reset, USB replug, or brownout — the daemon has no way to read the
+device's previous LED state back, only to (re)assert what it should be. This is why
+the design keeps a host-side cache of last-set colors and periodically re-asserts it
+(see the design spec). In theory this means you can unplug a device, connect it to
+another port, and the daemon will recognize it up to 24 hours later and set the display
+as it was, or as it has been updated since the disconnection.
 
 ## Roadmap
 
@@ -177,51 +251,21 @@ I'm planning to add templates to suport all sorts of use cases, please add your 
 Windows support is an open question intentionally left for a future community PR, since I don't have windows machines available, so this is
 not being built or tested here.
 
-## Networking
+## Status
 
-`blinkenkeysd` always binds a `$HOME`-owned Unix domain socket (mode `0600`) for
-local clients — reachable elegantly from shell/curl via `curl --unix-socket <path>
-http://localhost/...` (supported natively since curl 7.40, no extra tooling needed).
-It can *optionally* also bind a TCP listener (default `:49994`; e.g. for reaching the
-daemon from a remote SSH session or server back to the machine the keyboard is physically
-attached to) — when TCP is enabled, a bearer token is mandatory (not just optional),
-since filesystem permissions no longer provide the access control. Plain HTTP + token
-is the accepted threat model for now (LAN/trusted-network use); SSH port forwarding
-is the documented escape hatch if stronger transport security is ever needed, rather
-than adding TLS to `blinkenkeysd` itself. If you feel good about running an open
-daemon on your LAN and let any of your cow orkers changing your key colours,
-feel free to patch it, but I don't condone it :)
+Developed against the `cxt_studio/12e4` macropad -
+[see this gist](https://gist.github.com/seefood/013529d4c17f449a09ff50a7bb596ad2)
+for how that board's firmware got Vial + VialRGB support in the first place -
+but designed to generalize to any VialRGB-capable device. It drives the keys
+through VialRGB's "Direct" mode (host-controlled, RAM-only LED colors,
+independent of the Vial app).
 
-See
-[`docs/superpowers/manual-checks/tcp-listener.md`](docs/superpowers/manual-checks/tcp-listener.md)
-for the TCP listener's manual verification checklist.
-
-## Known limitations
-
-`blinkenkeysd` opens the device's raw-HID interface exclusively, the same way Vial's
-own GUI does — only one process can hold that handle at a time. Running `blinkenkeysd`
-and Vial (or `set_key_color.py`, or any other tool talking to the same interface)
-against the same device simultaneously doesn't work; whichever opened it first keeps
-it, and the other fails to open the device until the first one releases it.
-
-To free the device for Vial without uninstalling the service:
-
-- **Linux:** `systemctl --user stop blinkenkeysd.service`, then
-  `systemctl --user start blinkenkeysd.service` (or just
-  `packaging/linux/install.sh`) when you're done.
-- **macOS:** `launchctl bootout "gui/$(id -u)/com.seefood.blinkenkeysd"`, then
-  `launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.seefood.blinkenkeysd.plist`
-  (or just `packaging/macos/install.sh`) when you're done. Note `bootout` only
-  stops it for the current login session — since the LaunchAgent has
-  `RunAtLoad`, it comes back automatically on your next login/reboot.
-
-VialRGB Direct-mode colors (`g_direct_mode_colors`) live in RAM only and are lost on
-any firmware reset, USB replug, or brownout — the daemon has no way to read the
-device's previous LED state back, only to (re)assert what it should be. This is why
-the design keeps a host-side cache of last-set colors and periodically re-asserts it
-(see the design spec). In theory this means you can unplug a device, connect it to
-another port, and the daemon will recognize it up to 24 hours later and set the display
-as it was, or as it has been updated since the disconnection.
+Language/implementation: **Go**. Specs:
+[Phases 1–2](docs/superpowers/specs/2026-09-21-blinkenkeys-phase1-2-design.md) (POC → MVP)
+and [Phase 3](docs/superpowers/specs/2026-09-24-blinkenkeys-phase3-effects-templates-design.md)
+(effects, templates, server-owned timers). Phase 5 (per-client key allocation) is
+also implemented, specced inline in Phase 3's "Named-key model" section; see
+`CHANGELOG.md` for design revisions.
 
 ## License
 
