@@ -3,6 +3,7 @@ package termid
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -176,5 +177,46 @@ func TestFallbackNameOrderAndSanitize(t *testing.T) {
 	}
 	if name, src := FallbackName(get(nil)); name != "" || src != "" {
 		t.Errorf("empty env: %q %q", name, src)
+	}
+}
+
+const itermUUID = "20227CA2-2FD7-427C-BD68-3ABDE4CEEFF2"
+
+func TestDetectITermTabFromLiveLookup(t *testing.T) {
+	var gotName, gotScript string
+	run := func(_ context.Context, name string, args ...string) (string, error) {
+		gotName, gotScript = name, strings.Join(args, " ")
+		return "6\n", nil
+	}
+	// The env var says t0 (stale); iTerm says the session is now tab 6.
+	id := Detect(context.Background(), envOf(map[string]string{"ITERM_SESSION_ID": "w0t0p0:" + itermUUID}, run))
+	if id.Tab != 6 || id.InstanceID != "20227CA2" {
+		t.Errorf("got %+v, want live tab 6", id)
+	}
+	if gotName != "osascript" || !strings.Contains(gotScript, itermUUID) {
+		t.Errorf("helper = %q %q, want osascript querying the session UUID", gotName, gotScript)
+	}
+}
+
+func TestDetectITermLiveLookupFailureKeepsEnvTab(t *testing.T) {
+	for name, run := range map[string]func(context.Context, string, ...string) (string, error){
+		"error":   func(context.Context, string, ...string) (string, error) { return "", errors.New("boom") },
+		"garbage": func(context.Context, string, ...string) (string, error) { return "missing value\n", nil },
+		"zero":    func(context.Context, string, ...string) (string, error) { return "0\n", nil },
+		"empty":   func(context.Context, string, ...string) (string, error) { return "", nil },
+	} {
+		id := Detect(context.Background(), envOf(map[string]string{"ITERM_SESSION_ID": "w0t2p0:" + itermUUID}, run))
+		if id.Tab != 3 {
+			t.Errorf("%s: got tab %d, want env fallback 3", name, id.Tab)
+		}
+	}
+}
+
+func TestDetectITermNeverInterpolatesUnsafeUUID(t *testing.T) {
+	called := false
+	run := func(context.Context, string, ...string) (string, error) { called = true; return "9\n", nil }
+	id := Detect(context.Background(), envOf(map[string]string{"ITERM_SESSION_ID": `w0t1p0:x" & (do shell script "id") & "`}, run))
+	if called || id.Tab != 2 {
+		t.Errorf("called=%v tab=%d; a non-hex UUID must not reach AppleScript", called, id.Tab)
 	}
 }

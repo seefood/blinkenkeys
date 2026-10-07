@@ -99,10 +99,45 @@ func detectTmux(ctx context.Context, env Env) (Identity, bool) {
 
 // itermRE matches ITERM_SESSION_ID: w<window>t<tab>p<pane>[:<UUID>]. iTerm
 // numbers tabs from 0; the variable is fixed when the shell starts, so it
-// goes stale if tabs are later reordered or closed.
+// goes stale if tabs are later reordered or closed — so when the UUID is
+// present the tab is re-read from iTerm itself (itermLiveTab) and the
+// env-derived number is only the fallback.
 var itermRE = regexp.MustCompile(`^w(\d+)t(\d+)p(\d+)(?::(.+))?$`)
 
-func detectITerm(_ context.Context, env Env) (Identity, bool) {
+// itermUUIDRE is the only shape of session id allowed into AppleScript.
+var itermUUIDRE = regexp.MustCompile(`^[0-9A-Fa-f-]{8,64}$`)
+
+// itermLiveTab asks iTerm for the current 1-based tab position, within its
+// window, of the session with this UUID; 0 if unavailable (iTerm not running,
+// no osascript, session gone, automation permission denied, unparseable).
+func itermLiveTab(ctx context.Context, env Env, uuid string) int {
+	if !itermUUIDRE.MatchString(uuid) {
+		return 0
+	}
+	script := `if application "iTerm2" is not running then return ""
+tell application "iTerm2"
+	repeat with w in windows
+		set n to 0
+		repeat with t in tabs of w
+			set n to n + 1
+			repeat with s in sessions of t
+				if (unique id of s) is "` + uuid + `" then return n
+			end repeat
+		end repeat
+	end repeat
+	return ""
+end tell`
+	out, err := env.Run(ctx, "osascript", "-e", script)
+	if err != nil {
+		return 0
+	}
+	if n, err := strconv.Atoi(strings.TrimSpace(out)); err == nil && n >= 1 {
+		return n
+	}
+	return 0
+}
+
+func detectITerm(ctx context.Context, env Env) (Identity, bool) {
 	raw := env.Getenv("ITERM_SESSION_ID")
 	if raw == "" {
 		return Identity{}, false
@@ -116,6 +151,9 @@ func detectITerm(_ context.Context, env Env) (Identity, bool) {
 	id.Tab = t + 1
 	if m[4] != "" {
 		uuid := m[4]
+		if live := itermLiveTab(ctx, env, uuid); live > 0 {
+			id.Tab = live
+		}
 		if len(uuid) > 8 {
 			uuid = uuid[:8]
 		}

@@ -118,7 +118,7 @@ tmux panes).
 | Terminal | Tab number | Instance id (fallback name) | Status |
 |---|---|---|---|
 | tmux | `tmux display -p -t $TMUX_PANE '#{window_index}'` | `$TMUX_PANE` | verified (`window_index` and `base-index` both work) |
-| iTerm2 | `t` field of `$ITERM_SESSION_ID` (`w0t1p0:UUID`) | `w0t1p0` | zero-based (docs-verified); the env var is fixed when the shell starts, so it goes **stale** after tab reorder/close (accepted limitation); `wNtN` repeats across windows |
+| iTerm2 | `t` field of `$ITERM_SESSION_ID` (`w0t1p0:UUID`) | `w0t1p0` | zero-based (docs-verified); the env var is fixed when the shell starts, so it goes **stale** after tab reorder/close — when the UUID is present, `blincli` re-reads the live tab position via `osascript` (~0.25 s) and uses the env value only as fallback; `wNtN` repeats across windows |
 | WezTerm | tab position via `wezterm cli list --format json` | `$WEZTERM_PANE` (verified: monotonic mux-lifetime counter) | JSON shape verified (`window_id`, `tab_id`, `pane_id`); no tab-position field, so tab number = rank of `tab_id` in list order (list order = tab order still **[unverified]**, manual check 3) |
 | kitty | `kitten @ ls` (needs remote control enabled) | `$KITTY_WINDOW_ID` | **[unverified]**; tab number likely skipped |
 
