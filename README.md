@@ -236,9 +236,13 @@ traffic, so the daemon never listens on the network.
    ```
 
 Notes: while no SSH session holds the forward, `blincli` exits 69 (unreachable).
-`blincli` picks a key from the terminal it runs in (tmux, WezTerm, ...); if none
-is recognized, pass `-n NAME` or set `$BLINKENKEYS_NAME`. With several SSH
-sessions to the same host, only the first can bind the port; later ones print
+`blincli` picks a key from the terminal it runs in (tmux, WezTerm, ...).
+Inside Claude Code, the stock `hooks-blincli.json` needs no flags even without a
+recognized terminal: the key is claimed from `$CLAUDE_CODE_SESSION_ID` and
+prefixed with the remote hostname (e.g. `barnowl.claude-<id>`), so it can't
+collide with local sessions. In a plain shell outside Claude Code, `blincli
+detect` reports no key; pass `-n NAME` or set `$BLINKENKEYS_NAME`, which is
+used verbatim, without the hostname prefix. With several SSH sessions to the same host, only the first can bind the port; later ones print
 `remote port forwarding failed` but still work, through the first session's
 forward, which then has to stay open. Rotating the token means editing it on
 both machines.
