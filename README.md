@@ -182,6 +182,67 @@ See
 [`docs/superpowers/manual-checks/tcp-listener.md`](docs/superpowers/manual-checks/tcp-listener.md)
 for the TCP listener's manual verification checklist.
 
+### Using the keyboard from a remote machine over SSH
+
+Run the daemon on the machine the keyboard is plugged into (the "desk" machine)
+and only `blincli` on the remote host; an SSH reverse forward carries the
+traffic, so the daemon never listens on the network.
+
+1. **Desk machine, `~/.config/blinkenkeys/config.yaml`** — enable the TCP
+   listener on loopback with a token, restrict the file, then restart the daemon:
+
+   ```yaml
+   listeners:
+     tcp:
+       address: "127.0.0.1:49994"
+       token: "<output of: openssl rand -hex 32>"
+   ```
+
+   ```bash
+   chmod 600 ~/.config/blinkenkeys/config.yaml
+   blinkenkeysd --check-config
+   brew services restart blinkenkeys   # Linux: systemctl --user restart blinkenkeysd
+   ```
+
+2. **Desk machine, `~/.ssh/config`** — forward the remote host's port 49994
+   back to the daemon (`RemoteForward`, not `LocalForward`: the listening end
+   must be on the remote host):
+
+   ```
+   Host myremote
+       RemoteForward 49994 127.0.0.1:49994
+   ```
+
+3. **Remote host** — install `blincli` from the matching
+   [release tarball](#installation) (copy just `bin/blincli` somewhere on `PATH`;
+   the daemon, udev rule and service are not needed), put the token in a
+   file only you can read, and point the client at the forward:
+
+   ```bash
+   mkdir -p ~/.config/blinkenkeys && umask 077
+   printf '%s\n' '<the token>' > ~/.config/blinkenkeys/token
+   blincli config init --url http://127.0.0.1:49994 --token-file ~/.config/blinkenkeys/token
+   ```
+
+   Use `127.0.0.1`, not `localhost`: `localhost` may resolve to `::1`, which the
+   daemon does not listen on.
+
+4. **Check it** — connect with `ssh myremote` (the forward lives only as long as
+   that session), then on the remote host:
+
+   ```bash
+   blincli devices          # lists your keyboard
+   blincli detect           # shows the terminal, key and endpoint blincli would use
+   ```
+
+Notes: while no SSH session holds the forward, `blincli` exits 69 (unreachable).
+`blincli` picks a key from the terminal it runs in (tmux, WezTerm, ...); if none
+is recognized, pass `-n NAME` or set `$BLINKENKEYS_NAME`. With several SSH
+sessions to the same host, only the first can bind the port; later ones print
+`remote port forwarding failed` but still work, through the first session's
+forward, which then has to stay open. Rotating the token means editing it on
+both machines.
+
 ## Known limitations
 
 `blinkenkeysd` opens the device's raw-HID interface exclusively, the same way Vial's
