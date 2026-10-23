@@ -71,6 +71,29 @@ func TestDetectWezTermTabIsRankWithinWindow(t *testing.T) {
 	}
 }
 
+func TestDetectWezTermRetriesTransientListFailure(t *testing.T) {
+	calls := 0
+	run := func(context.Context, string, ...string) (string, error) {
+		calls++
+		if calls < 3 {
+			return "", errors.New("exit status 1")
+		}
+		return weztermList, nil
+	}
+	id := Detect(context.Background(), envOf(map[string]string{"WEZTERM_PANE": "9"}, run))
+	if id.Tab != 2 || calls != 3 {
+		t.Errorf("got %+v after %d calls, want tab 2 after 3", id, calls)
+	}
+}
+
+func TestDetectWezTermPersistentListFailureDegrades(t *testing.T) {
+	run := func(context.Context, string, ...string) (string, error) { return "", errors.New("exit status 1") }
+	id := Detect(context.Background(), envOf(map[string]string{"WEZTERM_PANE": "9"}, run))
+	if id.Terminal != "wezterm" || id.Tab != 0 || id.InstanceID != "9" {
+		t.Errorf("got %+v", id)
+	}
+}
+
 func TestDetectWezTermBadOutputDegrades(t *testing.T) {
 	for _, out := range []string{"not json", "[]", `[{"window_id":0,"tab_id":0,"pane_id":3}]`} {
 		run := func(context.Context, string, ...string) (string, error) { return out, nil }

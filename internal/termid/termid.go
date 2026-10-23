@@ -170,14 +170,23 @@ type weztermPane struct {
 	PaneID   int `json:"pane_id"`
 }
 
+// weztermListAttempts bounds retries of `wezterm cli list` within helperTimeout.
+const weztermListAttempts = 3
+
 func detectWezTerm(ctx context.Context, env Env) (Identity, bool) {
 	pane := env.Getenv("WEZTERM_PANE")
 	if pane == "" {
 		return Identity{}, false
 	}
 	id := Identity{Terminal: "wezterm", InstanceID: Sanitize(pane)}
-	if out, err := env.Run(ctx, "wezterm", "cli", "list", "--format", "json"); err == nil {
-		id.Tab = weztermTab(out, pane)
+	// `wezterm cli list` fails intermittently (~5%: "Invalid Bool Encoding"
+	// decoding the mux response). Without a tab the caller falls back to a
+	// pool claim on a different key, so retry; each call takes ~20ms.
+	for range weztermListAttempts {
+		if out, err := env.Run(ctx, "wezterm", "cli", "list", "--format", "json"); err == nil {
+			id.Tab = weztermTab(out, pane)
+			break
+		}
 	}
 	return id, true
 }
