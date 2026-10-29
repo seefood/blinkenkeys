@@ -17,7 +17,7 @@ func envOf(vars map[string]string, run func(ctx context.Context, name string, ar
 
 func TestDetectITerm(t *testing.T) {
 	id := Detect(context.Background(), envOf(map[string]string{"ITERM_SESSION_ID": "w0t2p1:C3D91F33-3805-47E2-A3F6-B8AED6EC2209"}, nil))
-	if id.Terminal != "iterm" || id.Tab != 3 || id.InstanceID != "C3D91F33" || id.Name() != "iterm-C3D91F33" {
+	if id.Terminal != "iterm" || id.Tab != 0 || id.InstanceID != "C3D91F33" || id.Name() != "iterm-C3D91F33" {
 		t.Errorf("got %+v (%q)", id, id.Name())
 	}
 	bare := Detect(context.Background(), envOf(map[string]string{"ITERM_SESSION_ID": "w1t0p0"}, nil))
@@ -221,7 +221,7 @@ func TestDetectITermTabFromLiveLookup(t *testing.T) {
 	}
 }
 
-func TestDetectITermLiveLookupFailureKeepsEnvTab(t *testing.T) {
+func TestDetectITermLiveLookupFailureDropsStaleTab(t *testing.T) {
 	for name, run := range map[string]func(context.Context, string, ...string) (string, error){
 		"error":   func(context.Context, string, ...string) (string, error) { return "", errors.New("boom") },
 		"garbage": func(context.Context, string, ...string) (string, error) { return "missing value\n", nil },
@@ -229,9 +229,24 @@ func TestDetectITermLiveLookupFailureKeepsEnvTab(t *testing.T) {
 		"empty":   func(context.Context, string, ...string) (string, error) { return "", nil },
 	} {
 		id := Detect(context.Background(), envOf(map[string]string{"ITERM_SESSION_ID": "w0t2p0:" + itermUUID}, run))
-		if id.Tab != 3 {
-			t.Errorf("%s: got tab %d, want env fallback 3", name, id.Tab)
+		if id.Tab != 0 || id.InstanceID != "20227CA2" {
+			t.Errorf("%s: got %+v, want Tab 0 (stale env tab 3 must not be used) with instance kept", name, id)
 		}
+	}
+}
+
+func TestDetectITermLiveLookupRetriesOnce(t *testing.T) {
+	calls := 0
+	run := func(context.Context, string, ...string) (string, error) {
+		calls++
+		if calls == 1 {
+			return "", errors.New("timed out")
+		}
+		return "4\n", nil
+	}
+	id := Detect(context.Background(), envOf(map[string]string{"ITERM_SESSION_ID": "w0t0p0:" + itermUUID}, run))
+	if id.Tab != 4 || calls != 2 {
+		t.Errorf("tab=%d calls=%d, want 4 after one retry", id.Tab, calls)
 	}
 }
 

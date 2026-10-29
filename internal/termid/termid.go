@@ -39,9 +39,15 @@ type Env struct {
 	Run    func(ctx context.Context, name string, args ...string) (string, error)
 }
 
-// helperTimeout bounds all helper commands of one Detect call together: a
-// hook must never hang on a missing tmux server or a stuck wezterm mux.
+// helperTimeout bounds all helper commands of one terminal's detector
+// together: a hook must never hang on a missing tmux server or a stuck
+// wezterm mux.
 const helperTimeout = 500 * time.Millisecond
+
+// itermTimeout is longer: osascript takes ~200ms idle and much longer when
+// many hooks query iTerm at once, and a miss costs a wrong key (see
+// detectITerm).
+const itermTimeout = 2 * time.Second
 
 // ExecRun is the real Env.Run.
 func ExecRun(ctx context.Context, name string, args ...string) (string, error) {
@@ -56,8 +62,6 @@ func ExecRun(ctx context.Context, name string, args ...string) (string, error) {
 // Detect identifies the calling terminal, most specific first: tmux (whose
 // panes share the outer terminal's env), then iTerm2, WezTerm, kitty.
 func Detect(ctx context.Context, env Env) Identity {
-	ctx, cancel := context.WithTimeout(ctx, helperTimeout)
-	defer cancel()
 	for _, d := range []func(context.Context, Env) (Identity, bool){detectTmux, detectITerm, detectWezTerm, detectKitty} {
 		if id, ok := d(ctx, env); ok {
 			return id
@@ -84,6 +88,8 @@ func detectTmux(ctx context.Context, env Env) (Identity, bool) {
 	if pane == "" {
 		return Identity{}, false
 	}
+	ctx, cancel := context.WithTimeout(ctx, helperTimeout)
+	defer cancel()
 	id := Identity{Terminal: "tmux", InstanceID: Sanitize(strings.TrimPrefix(pane, "%"))}
 	idx, err1 := env.Run(ctx, "tmux", "display-message", "-p", "-t", pane, "#{window_index}")
 	base, err2 := env.Run(ctx, "tmux", "show-options", "-gv", "base-index")
@@ -107,6 +113,9 @@ var itermRE = regexp.MustCompile(`^w(\d+)t(\d+)p(\d+)(?::(.+))?$`)
 // itermUUIDRE is the only shape of session id allowed into AppleScript.
 var itermUUIDRE = regexp.MustCompile(`^[0-9A-Fa-f-]{8,64}$`)
 
+// itermLookupAttempts bounds retries of the osascript lookup within itermTimeout.
+const itermLookupAttempts = 2
+
 // itermLiveTab asks iTerm for the current 1-based tab position, within its
 // window, of the session with this UUID; 0 if unavailable (iTerm not running,
 // no osascript, session gone, automation permission denied, unparseable).
@@ -127,7 +136,13 @@ tell application "iTerm2"
 	end repeat
 	return ""
 end tell`
-	out, err := env.Run(ctx, "osascript", "-e", script)
+	var out string
+	var err error
+	for range itermLookupAttempts {
+		if out, err = env.Run(ctx, "osascript", "-e", script); err == nil {
+			break
+		}
+	}
 	if err != nil {
 		return 0
 	}
@@ -142,6 +157,8 @@ func detectITerm(ctx context.Context, env Env) (Identity, bool) {
 	if raw == "" {
 		return Identity{}, false
 	}
+	ctx, cancel := context.WithTimeout(ctx, itermTimeout)
+	defer cancel()
 	id := Identity{Terminal: "iterm", InstanceID: Sanitize(raw)}
 	m := itermRE.FindStringSubmatch(raw)
 	if m == nil {
@@ -151,8 +168,11 @@ func detectITerm(ctx context.Context, env Env) (Identity, bool) {
 	id.Tab = t + 1
 	if m[4] != "" {
 		uuid := m[4]
-		if live := itermLiveTab(ctx, env, uuid); live > 0 {
-			id.Tab = live
+		// A failed lookup of a well-formed UUID leaves Tab 0 rather than the
+		// stale env tab: the caller then claims a pool key by instance id
+		// instead of writing to another tab's slot.
+		if itermUUIDRE.MatchString(uuid) {
+			id.Tab = itermLiveTab(ctx, env, uuid)
 		}
 		if len(uuid) > 8 {
 			uuid = uuid[:8]
@@ -178,6 +198,8 @@ func detectWezTerm(ctx context.Context, env Env) (Identity, bool) {
 	if pane == "" {
 		return Identity{}, false
 	}
+	ctx, cancel := context.WithTimeout(ctx, helperTimeout)
+	defer cancel()
 	id := Identity{Terminal: "wezterm", InstanceID: Sanitize(pane)}
 	// `wezterm cli list` fails intermittently (~5%: "Invalid Bool Encoding"
 	// decoding the mux response). Without a tab the caller falls back to a

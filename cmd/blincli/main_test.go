@@ -9,6 +9,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -28,7 +30,14 @@ func testApp(env map[string]string) (*app, *bytes.Buffer, *bytes.Buffer) {
 		isTTY: func() bool { return false },
 		termEnv: termid.Env{
 			Getenv: func(k string) string { return env[k] },
-			Run:    func(context.Context, string, ...string) (string, error) { return "", errors.New("no helper") },
+			Run: func(_ context.Context, name string, _ ...string) (string, error) {
+				// Stand-in for iTerm's live lookup: the tab the env var names.
+				if m := regexp.MustCompile(`^w\d+t(\d+)p`).FindStringSubmatch(env["ITERM_SESSION_ID"]); name == "osascript" && m != nil {
+					n, _ := strconv.Atoi(m[1])
+					return strconv.Itoa(n + 1), nil
+				}
+				return "", errors.New("no helper")
+			},
 		},
 	}, out, errb
 }
