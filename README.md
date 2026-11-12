@@ -145,6 +145,25 @@ touching your `~/.config/blinkenkeys/` config or
 [`docs/superpowers/manual-checks/phase2-5-macos-install.md`](docs/superpowers/manual-checks/phase2-5-macos-install.md)
 for the full install/uninstall verification checklist.
 
+### Managing the service
+
+| | macOS, Homebrew | macOS, `install.sh` | Linux, `install.sh` |
+|---|---|---|---|
+| start | `brew services start blinkenkeys` | `launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.seefood.blinkenkeysd.plist` | `systemctl --user start blinkenkeysd` |
+| stop | `brew services stop blinkenkeys` | `launchctl bootout "gui/$(id -u)/com.seefood.blinkenkeysd"` | `systemctl --user stop blinkenkeysd` |
+| restart | `brew services restart blinkenkeys` | `launchctl kickstart -k "gui/$(id -u)/com.seefood.blinkenkeysd"` | `systemctl --user restart blinkenkeysd` |
+| status | `brew services list` | `launchctl print "gui/$(id -u)/com.seefood.blinkenkeysd"` | `systemctl --user status blinkenkeysd` |
+| log | `$(brew --prefix)/var/log/blinkenkeysd.log` | `~/.local/state/blinkenkeys/blinkenkeysd.log` | `journalctl --user -u blinkenkeysd` |
+
+On macOS `launchctl bootout` unloads the job, so `restart` (`kickstart`) only
+works while it is loaded; after a `bootout` use `bootstrap` to bring it back.
+`bootout` lasts until your next login, when `RunAtLoad` loads the job again.
+Don't mix the Homebrew and `install.sh` installs on one machine: they register
+different launchd labels and would both try to open the same HID device.
+
+No service manager at all (any OS): run `blinkenkeysd` in the foreground,
+`blinkenkeysd -c <config dir>`; Ctrl-C stops it.
+
 ## blincli
 
 `blincli` is a small pure-Go client for the daemon's API; it finds the
@@ -260,11 +279,20 @@ To free the device for Vial without uninstalling the service:
 - **Linux:** `systemctl --user stop blinkenkeysd.service`, then
   `systemctl --user start blinkenkeysd.service` (or just
   `packaging/linux/install.sh`) when you're done.
-- **macOS:** `launchctl bootout "gui/$(id -u)/com.seefood.blinkenkeysd"`, then
+- **macOS, Homebrew install:** `brew services stop blinkenkeys`, then
+  `brew services start blinkenkeys` when you're done. (`brew services list`
+  shows the current state.)
+- **macOS, `packaging/macos/install.sh` install:**
+  `launchctl bootout "gui/$(id -u)/com.seefood.blinkenkeysd"`, then
   `launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.seefood.blinkenkeysd.plist`
   (or just `packaging/macos/install.sh`) when you're done. Note `bootout` only
   stops it for the current login session — since the LaunchAgent has
   `RunAtLoad`, it comes back automatically on your next login/reboot.
+
+  Don't mix the two: the Homebrew job is labeled `sh.brew.blinkenkeys`, so the
+  `com.seefood.blinkenkeysd` commands above don't see it. If you `bootout` a
+  job by hand, `launchctl bootstrap` needs the plist path, which is why
+  `brew services start` is the easier way back for a Homebrew install.
 
 VialRGB Direct-mode colors (`g_direct_mode_colors`) live in RAM only and are lost on
 any firmware reset, USB replug, or brownout — the daemon has no way to read the
