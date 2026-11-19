@@ -303,7 +303,14 @@ func (ds *deviceState) refresh(logger *slog.Logger) []dispatcher.PresentDevice {
 		if _, alreadyOpen := ds.openByPath[info.Path]; alreadyOpen {
 			continue
 		}
-		uid, hasUID := probeUID(info.Path, logger)
+		uid, err := probeUID(info.Path)
+		if err != nil {
+			// Not registering beats registering under a path-based name: that
+			// would orphan the real uid-… slot and show up as a second device.
+			// The path isn't recorded, so the next poll retries it.
+			logger.Warn("could not read device UID; will retry next poll", "path", info.Path, "err", err)
+			continue
+		}
 		dev, err := hid.Open(info.Path)
 		if err != nil {
 			logger.Warn("could not open device", "path", info.Path, "err", err)
@@ -315,7 +322,7 @@ func (ds *deviceState) refresh(logger *slog.Logger) []dispatcher.PresentDevice {
 		ds.openByPath[info.Path] = openDevice{
 			identity: hid.Identity{
 				Path: info.Path, VendorID: info.VendorID, ProductID: info.ProductID,
-				UID: uid, HasUID: hasUID,
+				UID: uid, HasUID: true,
 			},
 			ctrl: dev,
 		}
@@ -348,18 +355,35 @@ func (ds *deviceState) refresh(logger *slog.Logger) []dispatcher.PresentDevice {
 // and closes it before the caller opens the real long-lived handle on the
 // same path — sequential, not concurrent, so it doesn't violate macOS's
 // exclusive-HID-open semantics.
-func probeUID(path string, logger *slog.Logger) (uid [8]byte, hasUID bool) {
-	dev, err := hid.Open(path)
-	if err != nil {
-		logger.Warn("could not open candidate device", "path", path, "err", err)
-		return uid, false
+func probeUID(path string) ([8]byte, error) {
+	return retryUID(probeAttempts, probeRetryDelay, func() ([8]byte, error) {
+		dev, err := hid.Open(path)
+		if err != nil {
+			return [8]byte{}, err
+		}
+		defer func() { _ = dev.Close() }()
+		return dev.GetKeyboardUID()
+	})
+}
+
+// Right after a replug or wake, macOS can fail the first report or two.
+const (
+	probeAttempts   = 3
+	probeRetryDelay = 300 * time.Millisecond
+)
+
+// retryUID calls probe up to attempts times, sleeping delay between failures,
+// and returns the last error if none succeeds.
+func retryUID(attempts int, delay time.Duration, probe func() ([8]byte, error)) (uid [8]byte, err error) {
+	for i := 0; i < attempts; i++ {
+		if i > 0 {
+			time.Sleep(delay)
+		}
+		if uid, err = probe(); err == nil {
+			return uid, nil
+		}
 	}
-	defer func() { _ = dev.Close() }()
-	uid, err = dev.GetKeyboardUID()
-	if err != nil {
-		return uid, false
-	}
-	return uid, true
+	return uid, err
 }
 
 // pollForDevices re-enumerates every enumeratePollInterval, reconciles

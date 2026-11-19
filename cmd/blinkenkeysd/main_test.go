@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net"
 	"net/http"
@@ -343,5 +344,26 @@ func TestNewTCPServerEnforcesBearerToken(t *testing.T) {
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("correct token: status = %d, want 200", resp.StatusCode)
+	}
+}
+
+func TestRetryUID(t *testing.T) {
+	boom := errors.New("boom")
+	calls := 0
+	want := [8]byte{1}
+	got, err := retryUID(3, 0, func() ([8]byte, error) {
+		calls++
+		if calls < 3 {
+			return [8]byte{}, boom
+		}
+		return want, nil
+	})
+	if err != nil || got != want || calls != 3 {
+		t.Errorf("recovering probe: got %v, %v after %d calls", got, err, calls)
+	}
+
+	calls = 0
+	if _, err := retryUID(3, 0, func() ([8]byte, error) { calls++; return [8]byte{}, boom }); !errors.Is(err, boom) || calls != 3 {
+		t.Errorf("failing probe: err %v after %d calls, want boom after 3", err, calls)
 	}
 }

@@ -265,3 +265,33 @@ func TestDetectWithNothingStillReports(t *testing.T) {
 		t.Errorf("code %d:\n%s", code, out)
 	}
 }
+
+func TestDevicePrefersTheOnlyConnectedDevice(t *testing.T) {
+	cases := []struct {
+		name, json, want string
+		wantErr          bool
+	}{
+		{"one connected, one stale", `[{"name":"5754-c401-p","connected":false},{"name":"uid-1","connected":true}]`, "uid-1", false},
+		{"single untethered", `[{"name":"uid-1","connected":false}]`, "uid-1", false},
+		{"two connected", `[{"name":"a","connected":true},{"name":"b","connected":true}]`, "", true},
+		{"two untethered", `[{"name":"a","connected":false},{"name":"b","connected":false}]`, "", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(tc.json))
+			}))
+			defer srv.Close()
+			a, _, _ := testApp(map[string]string{"BLINKENKEYS_URL": srv.URL, "BLINKENKEYS_TOKEN": "t"})
+			g := &globals{}
+			ep, _, err := client.Resolver{Getenv: a.getenv, Home: a.home}.Resolve(client.Options{ConfigPath: os.DevNull})
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := a.device(context.Background(), g, client.FileConfig{}, client.New(ep))
+			if (err != nil) != tc.wantErr || got != tc.want {
+				t.Errorf("device() = %q, %v; want %q (err %v)", got, err, tc.want, tc.wantErr)
+			}
+		})
+	}
+}

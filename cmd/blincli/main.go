@@ -169,10 +169,21 @@ func (a *app) device(ctx context.Context, g *globals, fc client.FileConfig, cl *
 	if err != nil {
 		return "", err
 	}
-	switch len(devs) {
-	case 0:
+	if len(devs) == 0 {
 		return "", errors.New("blincli: the daemon reports no devices")
-	case 1:
+	}
+	// Stale untethered slots (e.g. a failed identity probe) must not hide the
+	// one live device; fall back to all of them only if none is connected.
+	var live []client.DeviceSummary
+	for _, d := range devs {
+		if d.Connected {
+			live = append(live, d)
+		}
+	}
+	if len(live) > 0 {
+		devs = live
+	}
+	if len(devs) == 1 {
 		return devs[0].Name, nil
 	}
 	names := make([]string, len(devs))
